@@ -1,0 +1,7 @@
+id: CartPole-v1
+family: gymnasium_standard
+action_space: discrete
+observation_attack_space: policy_input
+normalization:
+  enabled: false
+

@@ -1,0 +1,11 @@
+# Exact compatibility environment for the first WCDT victim/scenario snapshot.
+# Use Python 3.10 and keep this environment separate from third-party paper code.
+numpy==1.23.0
+torch==2.0.0
+gymnasium==0.29.1
+stable-baselines3==2.3.2
+PyYAML==6.0.1
+traci==1.22.0
+sumolib==1.22.0
+pytest==8.3.4
+

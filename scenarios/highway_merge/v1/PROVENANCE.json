@@ -1,0 +1,20 @@
+{
+  "contract_version": "sumo_merge_core_v1",
+  "snapshot_date": "2026-07-18",
+  "source_repository": "WCDT_ACCVP_Attack",
+  "source_commit": "faf152edfd06af2f2825428d1a4e62827290752d",
+  "source_path": "scenarios/highway_merge",
+  "copy_policy": "immutable one-way snapshot; never import the source repository at runtime",
+  "expected_sumo_version": "1.22.x",
+  "expected_traci_version": "1.22.0",
+  "files": {
+    "build_network.py": "54ea6d8a00998f413a163f18157a053d563a1cd20c45c980b3a77783a7f6e031",
+    "highway_merge.con.xml": "5559088c2de69e904307f7047849de072943586214bec19dd38ef3ecd8e67d3e",
+    "highway_merge.edg.xml": "e2e0636aa20ad38c765d391f053ebcbd93a81261b495d779dc37e3abf656f3d3",
+    "highway_merge.net.xml": "bcb5a62c9875e72f98c03de4c0e9dc7bc568df0d1649e5a9c29abe7b149888f9",
+    "highway_merge.nod.xml": "89e2bfcc7856c38f818a60c046563b23c9ee442c597d266428f7ad24c81504bf",
+    "highway_merge.rou.xml": "bdfb7cd98dead51bdcc175a604aa1753b2718c063d4454e686acfa294d1b2572",
+    "highway_merge.sumocfg": "5ca47390e28966e617ab3c9af8738fbf303b9abeed61013de890e36827b55aa7",
+    "scenario_geometry_check.json": "e768a43c830abebb96ab190419b5cc08927f77134db5896a02d25668306d46ca"
+  }
+}

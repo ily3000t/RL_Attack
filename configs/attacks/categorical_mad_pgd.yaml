@@ -1,0 +1,13 @@
+name: categorical_mad_pgd
+stage: observation
+knowledge: white_box
+objective: categorical_policy_kl
+attack_probability: 1.0
+budget:
+  space: normalized_policy_input
+  epsilon_ratio: 1.0
+solver:
+  steps: 20
+  restarts: 5
+  random_start: true
+

@@ -1,0 +1,19 @@
+name: p1_cartpole_attack_baseline
+environment: ../envs/cartpole_v1.yaml
+victim:
+  algorithm: stable_baselines3.PPO
+  policy: MlpPolicy
+  training_seeds: [0, 1, 2, 3, 4]
+evaluation:
+  deterministic: true
+  paired_episode_seeds:
+    start: 20000
+    count: 200
+  attacks:
+    - clean
+    - ../attacks/random_uniform.yaml
+    - ../attacks/fgsm_ce.yaml
+    - ../attacks/pgd_ce.yaml
+    - ../attacks/categorical_mad_pgd.yaml
+  epsilon_ratios: [0.0, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5]
+

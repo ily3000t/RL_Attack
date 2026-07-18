@@ -1,0 +1,10 @@
+name: fgsm_ce
+stage: observation
+knowledge: white_box
+objective: clean_greedy_action_cross_entropy
+attack_probability: 1.0
+budget:
+  space: normalized_policy_input
+  epsilon_ratio: 1.0
+gradient_evaluations_per_step: 1
+

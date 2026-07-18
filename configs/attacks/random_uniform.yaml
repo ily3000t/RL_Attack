@@ -1,0 +1,9 @@
+name: random_uniform
+stage: observation
+knowledge: black_box
+objective: policy_divergence
+attack_probability: 1.0
+budget:
+  space: normalized_policy_input
+  epsilon_ratio: 1.0
+

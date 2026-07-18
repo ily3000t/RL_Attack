@@ -1,0 +1,98 @@
+{
+  "schema_version": 1,
+  "verified_at": "2026-07-18",
+  "repositories": [
+    {
+      "name": "SA_PPO",
+      "url": "https://github.com/huanzhang12/SA_PPO.git",
+      "commit": "7f5193e770bc4b31dd7c1ddc6a866b28ba816659",
+      "default_branch": "master",
+      "license": "UNKNOWN",
+      "license_note": "No repository-level LICENSE/COPYING file at the pinned commit. Keep reference-only; do not copy or port code until permission or licensing is clarified.",
+      "recursive_checkout": true,
+      "submodules": [
+        {
+          "name": "auto_LiRPA",
+          "path": "auto_LiRPA",
+          "url": "https://github.com/KaidiXu/auto_LiRPA.git",
+          "commit": "389dc72fcff606944dca0504cc77f52fef024c4e"
+        }
+      ],
+      "role": "SA-PPO defense plus Robust-Sarsa, MAD, critic, and random attack reference",
+      "environment_profile": "legacy-sa-ppo",
+      "environment_note": "Use a dedicated Linux/WSL2 Python 3.7 environment. The upstream stack uses old Gym, torch>=1.3,<1.7, mujoco-py==1.50.1.68, and MuJoCo 1.5."
+    },
+    {
+      "name": "CAR-RL",
+      "url": "https://github.com/RyanHaoranLi/CAR-RL.git",
+      "commit": "0df6822bc5a0d205cc4a587bfeb8278471afa3e1",
+      "default_branch": "main",
+      "license": "UNKNOWN",
+      "license_note": "No repository-level LICENSE/COPYING file at the pinned commit. A bundled cox license covers only that component. Keep reference-only until root-project licensing is clarified.",
+      "recursive_checkout": false,
+      "submodules": [],
+      "role": "CAR-PPO defense reference with PGD and SGLD inner optimization",
+      "environment_profile": "legacy-sa-ppo",
+      "environment_note": "Use a dedicated Linux/WSL2 Python 3.7 environment. auto_LiRPA is vendored rather than a Git submodule despite the stale README command."
+    },
+    {
+      "name": "WocaR-RL",
+      "url": "https://github.com/umd-huang-lab/WocaR-RL.git",
+      "commit": "2856174b2c649ee377a63f1b15808cab74c6c699",
+      "default_branch": "main",
+      "license": "MIT",
+      "license_note": "Preserve the repository MIT license and attribution when reusing or porting code.",
+      "recursive_checkout": false,
+      "submodules": [],
+      "role": "WocaR-PPO worst-case-aware robust training reference",
+      "environment_profile": "legacy-sa-ppo",
+      "environment_note": "Use a dedicated Linux/WSL2 Python 3.7 environment. Keep the WocaR-DQN track separate if evaluated later."
+    },
+    {
+      "name": "paad_adv_rl",
+      "url": "https://github.com/umd-huang-lab/paad_adv_rl.git",
+      "commit": "ef04e7912abc0937531ba95920a1b78688cd023e",
+      "default_branch": "master",
+      "license": "UNKNOWN",
+      "license_note": "No repository-level LICENSE/COPYING file at the pinned commit. Treat as read-only experimental reference until licensing or author permission is established.",
+      "recursive_checkout": false,
+      "submodules": [],
+      "role": "PA-AD strong learned evasion attack reference for final defense auditing",
+      "environment_profile": "paad",
+      "environment_note": "Keep MuJoCo and Atari tracks in separate environments. Their legacy packages must not enter the core environment."
+    },
+    {
+      "name": "ATLA_robust_RL",
+      "url": "https://github.com/huanzhang12/ATLA_robust_RL.git",
+      "commit": "dfdf8f56a025da95e0a3d652e5e7010b30904a29",
+      "default_branch": "main",
+      "license": "UNKNOWN",
+      "license_note": "No repository-level LICENSE/COPYING file at the pinned commit. Nested dependency licenses do not license the root project. Keep reference-only until clarified.",
+      "recursive_checkout": true,
+      "submodules": [
+        {
+          "name": "auto_LiRPA",
+          "path": "auto_LiRPA",
+          "url": "https://github.com/KaidiXu/auto_LiRPA.git",
+          "commit": "c8935c6d22cd76e137b1a9b1b3ea67f7d234601d"
+        }
+      ],
+      "role": "Learned observation adversary and ATLA-PPO robust-training reference",
+      "environment_profile": "atla",
+      "environment_note": "Use a dedicated legacy Linux/WSL2 Python 3.7 environment; do not install its old Gym/MuJoCo stack into the core environment."
+    },
+    {
+      "name": "Robust-Gymnasium",
+      "url": "https://github.com/SafeRL-Lab/Robust-Gymnasium.git",
+      "commit": "af6de64d92793ef4c01b80e51e3f2bcd35f8066b",
+      "default_branch": "main",
+      "license": "MIT",
+      "license_note": "Preserve the repository MIT license and attribution.",
+      "recursive_checkout": false,
+      "submodules": [],
+      "role": "Optional modular perturbation-interface reference",
+      "environment_profile": "robust-gymnasium",
+      "environment_note": "Use a separate modern Linux Python 3.11 environment and install only the required extras; the full dependency set is heavy."
+    }
+  ]
+}

@@ -1,0 +1,39 @@
+contract_version: sumo_sensor_budget_v1
+status: initial_engineering_budget_requires_sensor-calibration
+observation_contract: sumo_merge_core_v1
+units: normalized_observation
+description: >
+  Continuous perception fields are mutable. Lane indices and Boolean semantic
+  flags are frozen; discrete spoofing is evaluated as a separate attack track.
+base_physical_tolerances:
+  speed_mps: 0.5
+  acceleration_mps2: 0.2
+  longitudinal_position_m: 0.5
+  lateral_position_m: 0.2
+  vehicle_length_m: 0.1
+  vehicle_width_m: 0.05
+epsilon_by_field:
+  ego:
+    speed: 0.0142857143
+    acceleration: 0.04
+    lane_index: 0.0
+    lane_position: 0.001
+    world_x: 0.001
+    world_y: 0.002
+    is_ramp: 0.0
+    is_auxiliary: 0.0
+  each_neighbor:
+    relative_x: 0.005
+    relative_y: 0.008
+    relative_speed: 0.0142857143
+    relative_lane_index: 0.0
+    length: 0.01
+    width: 0.0125
+    is_ramp: 0.0
+    is_target_or_auxiliary: 0.0
+  merge:
+    distance_to_taper: 0.0016666667
+    success_distance: 0.0016666667
+    target_front_gap: 0.005
+    target_rear_gap: 0.005
+sweep_multipliers: [0.0, 0.25, 0.5, 1.0, 2.0]

@@ -1,0 +1,13 @@
+name: pgd_ce
+stage: observation
+knowledge: white_box
+objective: clean_greedy_action_cross_entropy
+attack_probability: 1.0
+budget:
+  space: normalized_policy_input
+  epsilon_ratio: 1.0
+solver:
+  steps: 20
+  restarts: 5
+  random_start: true
+

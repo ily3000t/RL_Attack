@@ -1,0 +1,46 @@
+contract_version: sumo_merge_core_v1
+scenario:
+  relative_config_path: scenarios/highway_merge/v1/highway_merge.sumocfg
+  ego_id: ego
+  step_length: 0.1
+  episode_seconds: 80.0
+  control_interval_steps: 5
+  warmup_steps: 11
+  top_k_neighbors: 5
+  ego_lane_change_mode: 512
+  action_execution_profile: current_v1
+  ramp_edges: [ramp_in]
+  auxiliary_edges: [main_aux]
+  mainline_edges: [main_in, main_aux, main_out]
+  target_lane_edges: [main_in, main_aux, main_out]
+  merge_zone_edges: [ramp_in, main_aux]
+  merge_side: right
+  auxiliary_lane: 0
+  auxiliary_lane_by_edge:
+    main_aux: 0
+  target_lane_by_edge:
+    main_in: 0
+    main_aux: 1
+    main_out: 0
+  taper_edge: main_aux
+  taper_miss_distance: 40.0
+  success_edge: main_out
+  success_min_lane_position: 40.0
+  merge_target_lane: 1
+metrics:
+  version: oriented_box_v1
+  near_miss_distance_threshold: 0.75
+  ttc_threshold: 1.5
+  drac_threshold: 3.35
+  hard_brake_threshold: -3.0
+reward:
+  profile: default
+  progress: 0.05
+  speed: 0.02
+  merge_success: 100.0
+  collision: -100.0
+  near_miss: -10.0
+  low_ttc: -3.0
+  high_drac: -2.0
+  hard_brake: -1.0
+  lane_oob: -5.0
