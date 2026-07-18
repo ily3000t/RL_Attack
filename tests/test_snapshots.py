@@ -45,3 +45,17 @@ def test_upstream_repositories_are_locked_to_full_commits() -> None:
         assert entry["license"] in {"MIT", "UNKNOWN"}
         for submodule in entry["submodules"]:
             assert SHA1.fullmatch(submodule["commit"])
+
+
+def test_core_dependency_lock_contains_only_exact_unique_versions() -> None:
+    root = Path(__file__).resolve().parents[1]
+    lock = root / "requirements" / "core-py310-windows.lock.txt"
+    entries = [
+        line.strip()
+        for line in lock.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    assert entries
+    assert all(line.count("==") == 1 for line in entries)
+    names = [re.sub(r"[-_.]+", "-", line.split("==", 1)[0]).lower() for line in entries]
+    assert len(names) == len(set(names))

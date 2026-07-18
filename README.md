@@ -43,10 +43,11 @@ implemented as separate tracks so their threat models are not mixed.
 .\.venv\Scripts\Activate.ps1
 ```
 
-The setup script creates only `RL_Attack\.venv` and installs the exact
-top-level versions in `requirements/wcdt-compat.txt`. It never changes a WCDT
-environment. Paper repositories use separate environments described under
-`third_party/environments`.
+The setup script creates only `RL_Attack\.venv` and installs the fully resolved
+Windows/Python 3.10 lock in `requirements/core-py310-windows.lock.txt`.
+`requirements/wcdt-compat.txt` records the source-compatible top-level stack.
+The script never changes a WCDT environment. Paper repositories use separate
+environments described under `third_party/environments`.
 
 ## Smoke experiment
 
@@ -64,6 +65,7 @@ protocol in `configs/experiments`.
 
 ```powershell
 python scripts/check_isolation.py
+python scripts/verify_core_lock.py
 python -m pytest tests -q
 .\scripts\sync_upstream.ps1 -VerifyOnly
 ```
