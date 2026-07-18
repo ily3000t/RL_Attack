@@ -20,29 +20,34 @@ Acceptance gate: attacks pass projection/reproducibility tests, clean and
 attacked evaluation use the same victim/seed cohort, and PGD/MAD are not weaker
 than their clean objective in deterministic unit cases.
 
-## P2 — public-task defense reproduction (next)
+## P2 — public-task defense implementation (implemented)
 
 - Vanilla PPO victim sets on classic control and HighwayEnv;
 - Adv-PPO as an explicitly specified adversarial-training baseline;
-- SA-PPO and CAR-PPO paper-fidelity checks in their isolated legacy repos;
-- clean-room SB3 ports after license review;
+- SA-PPO and CAR-PPO fidelity boundaries recorded against isolated references;
+- maintained clean-room SB3 objective ports with no legacy runtime imports;
+- one-step IBP greedy-action certification for supported MLP actors;
 - clean-performance/robustness Pareto curves rather than one attack setting.
 
-Acceptance gate: five or more independently trained victims per method, fixed
-validation/test splits, and defense selection without test-seed access.
+Implementation gate: unit/integration regression, explicit fidelity metadata,
+isolated dependencies, and auditable checkpoint manifests. The statistical
+experiment gate remains five or more independently trained victims per method,
+fixed validation/test splits, and defense selection without test-seed access.
 
-## P3 — strong attack audit
+## P3 — reproduced strong-attack audit
 
-- Q/Safety-Critic PGD;
-- strategically timed attacks with a fixed temporal budget;
-- PA-AD or ATLA learned attacker;
-- action-output attacks on a separate leaderboard;
-- adaptive attacks that know the detector/purifier.
+- Robust-Sarsa/critic/MAD attack paths from the locked SA-PPO reference;
+- PA-AD learned attacker in its isolated legacy environment;
+- maintained adapters that evaluate frozen SB3 victims without importing
+  legacy repositories into the core package;
+- executable, budget-matched victim/epsilon/seed sweeps with
+  `worst-over-attacks`;
+- explicit paper-code versus clean-room fidelity labels.
 
 P1 attacks are correctness baselines. No defense is called robust until it is
-audited by P3 and evaluated with `worst-over-attacks`.
+audited by the reproduced P3 attacks.
 
-## P4 — proposed method
+## P4 — proposed strong attack
 
 Semantic, Temporally-budgeted, Factorized 9-action attack (working name
 `STFA-9`):
@@ -57,7 +62,24 @@ Required ablations: semantic vs plain norm ball, random vs learned timing,
 flat-nine vs factorized action target, CE/MAD vs safety-Q objective, and
 non-adaptive vs defense-aware attacks.
 
-## P5 — SUMO and layered validation
+## P5 — proposed defense
+
+Risk-Aware Policy-Invariance Defense (working name `RAPID-Guard`):
+
+- detector fuses temporal innovation, categorical policy divergence, and IBP
+  action-margin evidence;
+- state purifier projects suspicious observations onto a frozen
+  semantics/temporal feasible set;
+- uncertainty-calibrated gate selects purified policy input or a minimal
+  safety fallback;
+- training exposes the detector and purifier to P3 and P4 adaptive attacks;
+- thresholds are selected on validation cohorts without test-seed access.
+
+Required ablations: detector channels, purifier, adversarial training,
+certificate signal, fallback layer, adaptive white-box attack, clean
+performance cost, latency, and worst-over-attacks.
+
+## P6 — SUMO and layered validation
 
 Train/evaluate the same algorithm contracts on `sumo_merge_core_v1`. When WCDT
 produces a stable checkpoint, import it as a new immutable victim version.

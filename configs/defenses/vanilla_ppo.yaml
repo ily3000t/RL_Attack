@@ -1,0 +1,19 @@
+schema_version: p2_defense_v1
+key: vanilla_ppo
+display_name: Vanilla PPO
+entrypoint: rl_attack.cli.defense_baseline
+training_mode: vanilla
+reproduction_level: native
+paper_exact_reproduction: false
+upstream_runtime_dependency: false
+robust_training:
+  attack: none
+  epsilon: 0.0
+  attack_restarts: 1
+  epsilon_schedule_fraction: 0.0
+  adversarial_loss_coef: 0.0
+  policy_consistency_coef: 0.0
+  value_consistency_coef: 0.0
+description: >
+  Stable-Baselines3 PPO with no adversarial loss. This is the clean victim and
+  clean-performance reference for every P2 defense comparison.

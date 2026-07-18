@@ -12,6 +12,18 @@ from rl_attack.envs.wrappers import AdversarialObservationWrapper
 from rl_attack.policies.sb3 import SB3CategoricalPolicyAdapter
 
 
+def _environment_attribute(env: gym.Env, name: str, default: Any) -> Any:
+    """Read a wrapper attribute without Gymnasium's deprecated proxy access."""
+
+    get_wrapper_attr = getattr(env, "get_wrapper_attr", None)
+    if callable(get_wrapper_attr):
+        try:
+            return get_wrapper_attr(name)
+        except AttributeError:
+            return default
+    return getattr(env, name, default)
+
+
 @dataclass(frozen=True)
 class EpisodeResult:
     seed: int
@@ -69,6 +81,7 @@ def evaluate_sb3_policy(
                 observation, reward, terminated, truncated, final_info = env.step(action)
                 episode_return += float(reward)
                 length += 1
+            attack_count = int(_environment_attribute(env, "attack_count", 0))
             results.append(
                 EpisodeResult(
                     seed=int(episode_seed),
@@ -76,21 +89,39 @@ def evaluate_sb3_policy(
                     length=length,
                     terminated=bool(terminated),
                     truncated=bool(truncated),
-                    attack_count=int(getattr(env, "attack_count", 0)),
-                    policy_queries=int(getattr(env, "policy_queries", 0)),
+                    attack_count=attack_count,
+                    policy_queries=int(
+                        _environment_attribute(env, "policy_queries", 0)
+                    ),
                     gradient_evaluations=int(
-                        getattr(env, "gradient_evaluations", 0)
+                        _environment_attribute(env, "gradient_evaluations", 0)
                     ),
                     perturbation_linf_mean=(
-                        float(getattr(env, "perturbation_linf_sum", 0.0))
-                        / max(1, int(getattr(env, "attack_count", 0)))
+                        float(
+                            _environment_attribute(
+                                env,
+                                "perturbation_linf_sum",
+                                0.0,
+                            )
+                        )
+                        / max(1, attack_count)
                     ),
                     perturbation_linf_max=float(
-                        getattr(env, "perturbation_linf_max", 0.0)
+                        _environment_attribute(
+                            env,
+                            "perturbation_linf_max",
+                            0.0,
+                        )
                     ),
                     perturbation_l2_mean=(
-                        float(getattr(env, "perturbation_l2_sum", 0.0))
-                        / max(1, int(getattr(env, "attack_count", 0)))
+                        float(
+                            _environment_attribute(
+                                env,
+                                "perturbation_l2_sum",
+                                0.0,
+                            )
+                        )
+                        / max(1, attack_count)
                     ),
                     final_info=final_info,
                 )

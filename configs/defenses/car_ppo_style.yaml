@@ -1,0 +1,34 @@
+schema_version: p2_defense_v1
+key: car_ppo
+display_name: CAR-PPO (clean-room discrete-action objective)
+entrypoint: rl_attack.cli.defense_baseline
+training_mode: car_ppo_style
+reproduction_level: clean_room_objective
+paper_exact_reproduction: false
+certified_defense: false
+upstream_runtime_dependency: false
+reference:
+  repository: CAR-RL
+  locked_by: third_party/upstream-lock.json
+  runtime_import: forbidden
+robust_training:
+  attack: pgd
+  epsilon: 0.02
+  attack_steps: 10
+  attack_step_size: 0.005
+  attack_random_start: true
+  attack_restarts: 1
+  epsilon_schedule_fraction: 0.75
+  car_soft_lambda: 0.1
+  adversarial_loss_coef: 1.0
+  policy_consistency_coef: 0.0
+  value_consistency_coef: 0.0
+selection_grid:
+  epsilon: [0.01, 0.02, 0.05]
+  adversarial_loss_coef: [0.1, 0.3, 1.0]
+  car_soft_lambda: [10.0, 100.0, 1000.0]
+description: >
+  Maintained categorical SB3 port using per-sample adversarial clipped losses
+  and detached soft-CAR weights across each minibatch. Finite PGD approximates
+  the paper's state supremum; this is not a legacy paper-code run and provides
+  no certified robustness guarantee.

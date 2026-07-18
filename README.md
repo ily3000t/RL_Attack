@@ -10,7 +10,7 @@ victim-policy bundles. No runtime import from that repository is allowed.
 
 ## Current milestone
 
-Phase P0/P1:
+Phases P0/P1 are implemented:
 
 - versioned threat-model and perturbation contracts;
 - categorical SB3 policy adapter;
@@ -22,6 +22,18 @@ Phase P0/P1:
 - locked, isolated upstream research repositories.
 
 Release record: [`docs/releases/P0_P1.md`](docs/releases/P0_P1.md).
+
+Phase P2 defense implementations are also complete:
+
+- native SB3 Vanilla PPO;
+- an explicitly specified Adv-PPO engineering baseline;
+- clean-room SA-PPO and empirical CAR-PPO-style objectives;
+- one-step IBP certification of greedy actions for supported MLP actors;
+- auditable model bundles with resolved configs, hashes, runtime versions,
+  clean evaluation seeds, and fidelity metadata.
+
+The implementation gate is complete; multi-seed benchmark sweeps remain a
+separate compute run. Release record: [`docs/releases/P2.md`](docs/releases/P2.md).
 
 The current attack track is **test-time observation evasion**. Action-channel
 attacks, reward/rollout poisoning, parameter attacks, and backdoors will be
@@ -57,6 +69,8 @@ environments described under `third_party/environments`.
 rl-attack-baseline --env-id CartPole-v1 --timesteps 50000 --episodes 20
 rl-attack-baseline --env-id CartPole-v1 --load-model artifacts/cartpole/model.zip `
   --attack pgd-ce --epsilon 0.02 --steps 20 --restarts 5
+rl-attack-defense --method sa_ppo --env-id CartPole-v1 --timesteps 50000 `
+  --epsilon 0.02 --attack pgd --attack-steps 10
 ```
 
 The CLI is a correctness smoke path, not the final statistical experiment

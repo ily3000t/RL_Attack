@@ -1,0 +1,42 @@
+schema_version: p2_experiment_v1
+name: p2_cartpole_defense_baselines
+environment:
+  id: CartPole-v1
+  family: gymnasium_standard
+defenses:
+  - ../defenses/vanilla_ppo.yaml
+  - ../defenses/adv_ppo.yaml
+  - ../defenses/sa_ppo.yaml
+  - ../defenses/car_ppo_style.yaml
+training:
+  seeds: [0, 1, 2, 3, 4]
+  total_timesteps: 100000
+  ppo:
+    learning_rate: 0.0003
+    n_steps: 1024
+    batch_size: 64
+    n_epochs: 10
+    gamma: 0.99
+    gae_lambda: 0.95
+selection:
+  cohort:
+    seed_start: 10000
+    count: 100
+  test_seed_access: forbidden
+  objective: clean_robust_pareto
+evaluation:
+  deterministic: true
+  paired_test_cohort:
+    seed_start: 20000
+    count: 200
+  attacks:
+    - clean
+    - ../attacks/random_uniform.yaml
+    - ../attacks/fgsm_ce.yaml
+    - ../attacks/pgd_ce.yaml
+    - ../attacks/categorical_mad_pgd.yaml
+  epsilon_ratios: [0.0, 0.25, 0.5, 1.0, 2.0]
+report:
+  primary: worst_over_attacks
+  include_clean_robust_pareto: true
+  claim_limit: P2 correctness baseline; final robustness claims require the P3 strong attack audit.
