@@ -8,3 +8,5 @@
 *.xml text eol=lf
 *.sumocfg text eol=lf
 
+# Immutable simulator snapshots preserve source bytes (including line endings).
+scenarios/highway_merge/** -text
