@@ -21,6 +21,8 @@ Phase P0/P1:
 - frozen `sumo_merge_core_v1` scenario provenance;
 - locked, isolated upstream research repositories.
 
+Release record: [`docs/releases/P0_P1.md`](docs/releases/P0_P1.md).
+
 The current attack track is **test-time observation evasion**. Action-channel
 attacks, reward/rollout poisoning, parameter attacks, and backdoors will be
 implemented as separate tracks so their threat models are not mixed.
