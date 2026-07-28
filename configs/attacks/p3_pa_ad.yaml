@@ -1,0 +1,69 @@
+schema_version: p3_attack_v1
+name: p3_pa_ad_cartpole
+method: pa_ad
+threat_model:
+  stage: observation
+  knowledge: white_box
+  objective: return_degradation
+  test_time: true
+  adaptive_to_defense: false
+victim:
+  policy_interface: sb3_categorical
+  frozen: true
+  action_mode: stochastic
+  # Both hashes are mandatory and must identify the same frozen PPO used for
+  # director training and formal evaluation.
+  checkpoint_sha256: required_64_hex
+  policy_state_sha256: required_64_hex_parameters_and_buffers
+director:
+  algorithm: maintained_ppo
+  action_space: zero_sum_policy_direction
+  deterministic_evaluation: true
+  checkpoint_sha256: required
+  reward: negative_victim_reward
+  training_loop: executable_stochastic_pamdp
+actor:
+  victim_action_mode: stochastic
+  objective: policy_shift_l2_plus_direction_cosine
+  solver: fgsm
+  steps: 1
+  restarts: 1
+  random_start: false
+  alignment_weight: 1.0
+perturbation:
+  # Exact input received by the policy; no implicit normalization is claimed.
+  space: policy_input
+  norm: linf
+  observation_shape: [4]
+  flatten_contract: exact_policy_input_shape_no_implicit_flatten
+  # CartPole-v1 example. Every environment contract must replace this vector
+  # with exactly one explicit value per flattened policy feature.
+  epsilon_by_feature: [0.05, 0.05, 0.01, 0.01]
+  mutable_mask: [true, true, true, true]
+  lower_bound_source: exact_agent_observation_space_low_pinned_in_training_bundle
+  upper_bound_source: exact_agent_observation_space_high_pinned_in_training_bundle
+  training_binding: exact_epsilon_bounds_mask_and_observation_shape
+accounting:
+  max_policy_queries_per_attacked_step: 3
+  max_gradient_evaluations_per_attacked_step: 1
+  # These counters cover victim-policy forwards and victim input gradients.
+  # Director inference latency is currently excluded and not separately
+  # reported; wall-clock efficiency is therefore not claimed by P3.
+  director_inference_latency_separately_reported: false
+seed:
+  derivation: sha256_v1
+  required: true
+fidelity:
+  reproduction_level: clean_room_algorithmic
+  paper_exact_reproduction: false
+  upstream_runtime_dependency: false
+  upstream_license_status: unresolved_reference_only
+  claim: >
+    Clean-room reproduction of the PA-AD actor/director decomposition and
+    stochastic-victim objective. The maintained SB3/PPO director and explicit
+    per-feature sensor contract are project adaptations. Deterministic D-PAMDP
+    and its targeted-action J_D objective are intentionally not implemented.
+  epsilon_protocol: >
+    One director checkpoint is valid for exactly one nonzero epsilon vector.
+    Every additional nonzero epsilon requires a separately trained and pinned
+    checkpoint/sidecar; cross-epsilon transfer is not a strongest-attack claim.

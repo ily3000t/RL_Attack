@@ -35,6 +35,8 @@ dev = [
 [project.scripts]
 rl-attack-baseline = "rl_attack.cli.attack_baseline:main"
 rl-attack-defense = "rl_attack.cli.defense_baseline:main"
+rl-attack-strong-audit = "rl_attack.cli.strong_attack_audit:main"
+rl-attack-train-strong = "rl_attack.cli.reproduced_attack_training:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

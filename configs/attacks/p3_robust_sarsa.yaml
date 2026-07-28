@@ -1,0 +1,70 @@
+schema_version: 1
+name: robust_sarsa
+stage: observation
+knowledge: white_box
+objective: expected_return_degradation
+reproduction:
+  level: clean_room_categorical_adaptation
+  paper: https://papers.nips.cc/paper/2020/hash/f0eb6568ea114ba6e293f903c34d7488-Abstract.html
+  upstream_lock_name: SA_PPO
+  upstream_runtime_imports: false
+  notes:
+    - categorical PPO uses one-hot SARSA actions and expected Q
+    - finite multi-restart PGD jointly perturbs state and one-hot action inputs
+    - finite PGD is a non-convex approximation, not the paper's certified IBP/CROWN bound
+critic:
+  checkpoint: null
+  checkpoint_sha256: null
+  victim_checkpoint: null
+  victim_checkpoint_sha256: null
+  # Formal P3 uses sampled categorical execution so the expected-Q objective
+  # is exact in expectation. Deterministic greedy is supported only as an
+  # explicitly labeled smooth surrogate and must not be mixed into this run.
+  victim_action_mode: stochastic_sample
+  rollout_steps: 50000
+  gamma: 0.99
+  learning_rate: 0.0003
+  gradient_steps: 2000
+  batch_size: 256
+  hidden_sizes: [128, 128]
+  robust_coefficient: 0.1
+  # Scalar broadcasts to every policy-input feature. A flat
+  # per-feature vector is also accepted and is recorded effectively in the
+  # checkpoint manifest. Valid state bounds come from env.observation_space.
+  state_epsilon: 0.05
+  action_epsilon: 0.05
+  state_valid_bounds: environment_observation_space
+  action_robust_steps: 5
+  action_robust_restarts: 1
+  state_robust_step_size: null
+  action_robust_step_size: null
+  epsilon_warmup_fraction: 0.75
+attack:
+  victim_action_mode: stochastic_sample
+  # The maintained CartPole path attacks the exact policy input. It is not
+  # called normalized unless a frozen normalization wrapper is explicit.
+  budget_space: policy_input
+  epsilon: null
+  mutable_mask: null
+  steps: 20
+  restarts: 5
+  random_start: true
+  step_size: null
+  seed: 0
+  max_policy_queries_per_step: 106
+  max_gradient_evaluations_per_step: 100
+fallback:
+  on_numerical_or_gradient_failure: zero_perturbation
+  eligible_error_codes:
+    - non_finite_policy_logits
+    - non_finite_attack_objective
+    - non_finite_input_gradient
+    - non_finite_adversarial_observation
+    - disconnected_victim_gradient
+  result_valid: false
+  invalidates_audit: true
+  fail_closed_errors:
+    - invalid_shape
+    - device_error
+    - out_of_memory
+    - policy_runtime_error

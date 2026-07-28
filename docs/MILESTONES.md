@@ -34,10 +34,12 @@ isolated dependencies, and auditable checkpoint manifests. The statistical
 experiment gate remains five or more independently trained victims per method,
 fixed validation/test splits, and defense selection without test-seed access.
 
-## P3 — reproduced strong-attack audit
+## P3 — reproduced strong-attack audit (implementation completed)
 
-- Robust-Sarsa/critic/MAD attack paths from the locked SA-PPO reference;
-- PA-AD learned attacker in its isolated legacy environment;
+- Robust-Sarsa critic/attack semantics from the locked SA-PPO reference, plus
+  the maintained P1 categorical MAD-PGD baseline;
+- maintained clean-room PA-AD actor/director training, with the unresolved-
+  license upstream repository retained as reference-only evidence;
 - maintained adapters that evaluate frozen SB3 victims without importing
   legacy repositories into the core package;
 - executable, budget-matched victim/epsilon/seed sweeps with
@@ -46,6 +48,13 @@ fixed validation/test splits, and defense selection without test-seed access.
 
 P1 attacks are correctness baselines. No defense is called robust until it is
 audited by the reproduced P3 attacks.
+
+Implementation status: the maintained categorical Robust-Sarsa adaptation,
+stochastic-PAMDP PA-AD path, victim-bound checkpoints, learned-attacker
+training CLI, and paired executable audit are implemented and tested. The
+statistical gate remains pending: fixed multi-seed P2 victims must be used to
+train per-victim attack artifacts and run the frozen test matrix before any
+robustness ranking is claimed.
 
 ## P4 — proposed strong attack
 

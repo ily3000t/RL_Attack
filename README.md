@@ -35,6 +35,22 @@ Phase P2 defense implementations are also complete:
 The implementation gate is complete; multi-seed benchmark sweeps remain a
 separate compute run. Release record: [`docs/releases/P2.md`](docs/releases/P2.md).
 
+Phase P3 strong-attack reproduction machinery is implemented:
+
+- a clean-room categorical Robust-Sarsa critic and observation attack;
+- a clean-room PA-AD stochastic-PAMDP director, actor, and training loop;
+- victim/checkpoint hash binding and fail-closed action-mode contracts;
+- a learned-attacker training CLI;
+- a paired, budget-matched audit spanning PGD-CE, categorical MAD-PGD,
+  Robust-Sarsa, and PA-AD with strict artifacts and worst-over-attacks.
+
+PA-AD formally supports only stochastic categorical victims; the distinct
+deterministic D-PAMDP is not approximated. Its learned director is bound to one
+victim and one exact non-zero perturbation contract; epsilon sweeps train and
+pin a separate director per non-zero epsilon. The implementation/test gate is
+separate from the pending fixed-checkpoint, multi-seed statistical runs.
+Release record: [`docs/releases/P3.md`](docs/releases/P3.md).
+
 The current attack track is **test-time observation evasion**. Action-channel
 attacks, reward/rollout poisoning, parameter attacks, and backdoors will be
 implemented as separate tracks so their threat models are not mixed.

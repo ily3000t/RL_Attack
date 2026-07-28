@@ -1,0 +1,126 @@
+schema_version: p3_reproduced_attack_audit_v1
+name: p3_cartpole_reproduced_attack_audit
+environment:
+  id: CartPole-v1
+victims:
+  - name: vanilla_ppo_seed0
+    algorithm: stable_baselines3.PPO
+    checkpoint: ../../outputs/p2_defenses/CartPole-v1_vanilla_ppo_seed0/model.zip
+epsilon_profile:
+  name: cartpole_policy_linf_v1
+  space: policy_input
+  norm: linf
+  # Cart position, cart velocity, pole angle, pole angular velocity.
+  base_per_feature: [0.05, 0.05, 0.01, 0.01]
+  # This template pins one PA-AD director for its one nonzero training radius.
+  # Create a separate resolved config and trained director for every additional
+  # nonzero epsilon; a single checkpoint may not be swept across ratios.
+  ratios: [0.0, 1.0]
+  mutable_mask: [true, true, true, true]
+attacks:
+  - name: pgd_ce
+    factory: rl_attack.experiments.p3_audit:build_pgd_ce_attack
+    factory_kwargs:
+      steps: 20
+      restarts: 5
+      random_start: true
+    fidelity: maintained_p1_attack_baseline
+    fairness:
+      budget: p3_white_box_128
+      epsilon_profile: cartpole_policy_linf_v1
+      seed_protocol: paired_sha256_v1
+      reporting_protocol: paired_worst_v1
+    success:
+      kind: action_flip
+  - name: categorical_mad_pgd
+    factory: rl_attack.experiments.p3_audit:build_categorical_mad_pgd_attack
+    factory_kwargs:
+      steps: 20
+      restarts: 5
+      random_start: true
+    fidelity: maintained_p1_attack_baseline
+    fairness:
+      budget: p3_white_box_128
+      epsilon_profile: cartpole_policy_linf_v1
+      seed_protocol: paired_sha256_v1
+      reporting_protocol: paired_worst_v1
+    success:
+      kind: action_flip
+  - name: robust_sarsa
+    factory: rl_attack.experiments.p3_audit:build_robust_sarsa_attack
+    factory_kwargs:
+      critic_checkpoint: ../../outputs/p3_reproduced_attack_training/CartPole-v1_robust-sarsa_seed0/robust_sarsa.pt
+      critic_checkpoint_sha256: REPLACE_WITH_64_HEX_BEFORE_FORMAL_RUN
+      critic_manifest_sha256: REPLACE_WITH_64_HEX_BEFORE_FORMAL_RUN
+      steps: 20
+      restarts: 5
+      random_start: true
+    fidelity: clean_room_categorical_robust_sarsa_adaptation
+    fairness:
+      budget: p3_white_box_128
+      epsilon_profile: cartpole_policy_linf_v1
+      seed_protocol: paired_sha256_v1
+      reporting_protocol: paired_worst_v1
+    success:
+      kind: action_flip
+  - name: pa_ad
+    factory: rl_attack.experiments.p3_audit:build_pa_ad_attack
+    factory_kwargs:
+      director_checkpoint: ../../outputs/p3_reproduced_attack_training/CartPole-v1_pa-ad_seed0/pa_ad.pt
+      director_checkpoint_sha256: REPLACE_WITH_64_HEX_BEFORE_FORMAL_RUN
+      director_manifest_sha256: REPLACE_WITH_64_HEX_BEFORE_FORMAL_RUN
+      steps: 20
+      restarts: 5
+      random_start: true
+      alignment_weight: 1.0
+      deterministic_director: true
+    fidelity: clean_room_stochastic_pa_ad_with_pgd_actor_extension
+    fairness:
+      budget: p3_white_box_128
+      epsilon_profile: cartpole_policy_linf_v1
+      seed_protocol: paired_sha256_v1
+      reporting_protocol: paired_worst_v1
+    success:
+      kind: action_flip
+fairness:
+  budget:
+    name: p3_white_box_128
+    max_policy_queries_per_attacked_step: 128
+    max_gradient_evaluations_per_attacked_step: 128
+  seed_protocol:
+    name: paired_sha256_v1
+    episode_seed_start: 30000
+    episode_seed_count: 200
+    attack_base_seed: 31000000
+    derivation: sha256_u63_canonical_json_v1
+    paired_clean_attacked: true
+    paired_attack_opportunities: true
+    attack_probability: 1.0
+  reporting_protocol:
+    name: paired_worst_v1
+    victim_action_mode: stochastic
+    paired: true
+    primary: worst_over_attacks
+    metrics:
+      - episode_return
+      - paired_return_drop
+      - return_cvar_0.10
+      - action_flip_rate
+      - attack_specific_success_rate
+      - policy_queries_per_attacked_step
+      - gradient_evaluations_per_attacked_step
+      - worst_over_attacks
+statistics:
+  confidence_level: 0.95
+  bootstrap_resamples: 10000
+  cvar_alpha: 0.10
+safety:
+  event_info_keys:
+    - collision
+    - crashed
+    - constraint_violation
+    - near_miss
+    - shield_intervention
+  minimum_info_keys:
+    - minimum_ttc
+    - ttc
