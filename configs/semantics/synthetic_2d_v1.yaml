@@ -1,0 +1,7 @@
+schema_version: rl_attack.p4_policy_input_projector.v1
+name: synthetic_2d_policy_input
+observation_shape: [2]
+epsilon: [0.05, 0.05]
+lower: [-1.0, -1.0]
+upper: [1.0, 1.0]
+mutable_mask: [true, true]

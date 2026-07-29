@@ -51,6 +51,19 @@ pin a separate director per non-zero epsilon. The implementation/test gate is
 separate from the pending fixed-checkpoint, multi-seed statistical runs.
 Release record: [`docs/releases/P3.md`](docs/releases/P3.md).
 
+Phase P4 STFA implementation is complete:
+
+- hard per-episode temporal ledgers and factorized categorical targets;
+- semantic policy-input projection for SUMO and Highway contracts;
+- continuous projected optimization plus separately charged discrete search;
+- victim-bound safety-critic/director artifacts and strict NPZ training paths;
+- a paired, deterministic-argmax audit with fail-closed evidence scopes.
+
+This is an implementation and contract milestone. A stable SUMO PPO victim is
+not yet available, so no SUMO effectiveness or strongest-attack result is
+claimed. Contract: [`docs/contracts/p4_stfa.md`](docs/contracts/p4_stfa.md).
+Release record: [`docs/releases/P4.md`](docs/releases/P4.md).
+
 The current attack track is **test-time observation evasion**. Action-channel
 attacks, reward/rollout poisoning, parameter attacks, and backdoors will be
 implemented as separate tracks so their threat models are not mixed.
@@ -87,6 +100,7 @@ rl-attack-baseline --env-id CartPole-v1 --load-model artifacts/cartpole/model.zi
   --attack pgd-ce --epsilon 0.02 --steps 20 --restarts 5
 rl-attack-defense --method sa_ppo --env-id CartPole-v1 --timesteps 50000 `
   --epsilon 0.02 --attack pgd --attack-steps 10
+rl-attack-p4-audit <resolved-p4-config.yaml> --output-dir outputs/p4_stfa_audit
 ```
 
 The CLI is a correctness smoke path, not the final statistical experiment

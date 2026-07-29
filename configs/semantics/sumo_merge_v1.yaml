@@ -1,0 +1,20 @@
+schema_version: rl_attack.p4_sumo_merge_v1_projector.v1
+name: sumo_merge_core_v1_semantic
+contract_version: sumo_merge_core_v1
+observation_shape: [52]
+physical_budgets:
+  ego_speed_mps: 0.5
+  ego_accel_mps2: 0.2
+  ego_lane_position_m: 0.5
+  ego_x_m: 0.5
+  ego_y_m: 0.2
+  neighbor_relative_x_m: 0.5
+  neighbor_relative_y_m: 0.2
+  neighbor_relative_speed_mps: 0.5
+  neighbor_length_m: 0.1
+  neighbor_width_m: 0.05
+  merge_distance_m: 0.5
+  success_distance_m: 0.5
+  target_gap_m: 0.5
+immutable_indices: []
+neighbor_order_tolerance_m: 0.000001

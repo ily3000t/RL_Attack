@@ -56,20 +56,33 @@ statistical gate remains pending: fixed multi-seed P2 victims must be used to
 train per-victim attack artifacts and run the frozen test matrix before any
 robustness ranking is claimed.
 
-## P4 — proposed strong attack
+## P4 — STFA strong attack (implementation completed)
 
-Semantic, Temporally-budgeted, Factorized 9-action attack (working name
-`STFA-9`):
+Semantic, Temporally-budgeted, Factorized attack (`STFA`):
 
-- outer director selects attack time and lateral/longitudinal target;
-- inner projected optimizer uses physical units and semantic consistency;
-- safety-cost critic targets collision/near-miss/TTC/merge failure;
-- discrete vehicle-field operations are charged separately from continuous
-  perturbations.
+- outer director selects attack time and one available lateral/longitudinal
+  action target under a hard per-episode ledger;
+- inner projected optimizer supports safety, flat/factorized, CE, and MAD
+  objectives, restarts, and declared defense-aware modes;
+- SUMO and Highway projectors enforce policy-input semantics, with no claim of
+  simulator-state realizability;
+- learned safety critic/director artifacts bind the frozen victim, spaces,
+  action ontology, fixed datasets, environment/normalization/cost contracts,
+  full temporal budget, and horizon;
+- discrete SUMO single-field legal-grid candidates are explicitly allowlisted
+  and charged separately from continuous perturbations;
+- strict NPZ training and paired P4 audit CLIs fail closed on provenance or
+  accounting mismatch.
 
 Required ablations: semantic vs plain norm ball, random vs learned timing,
 flat-nine vs factorized action target, CE/MAD vs safety-Q objective, and
 non-adaptive vs defense-aware attacks.
+
+Implementation status: code, contracts, training plumbing, artifact binding,
+synthetic real-SB3 integration, and audit failure behavior are implemented and
+tested. The statistical gate remains pending. In particular, no stable SUMO PPO
+victim is available, so neither SUMO empirical effectiveness nor superiority
+over P3 attacks is claimed.
 
 ## P5 — proposed defense
 

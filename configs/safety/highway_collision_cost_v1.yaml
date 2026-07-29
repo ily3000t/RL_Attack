@@ -1,0 +1,27 @@
+schema_version: rl_attack.p4_safety_cost_definition.v1
+name: highway_collision_cost_v1
+environment_family: highway_env
+metric_version: null
+units: dimensionless_additive_cost
+source: environment_info_only
+terms:
+  collision:
+    source_key: crashed
+    kind: boolean
+    weight: 1.0
+  off_road:
+    source_key: on_road
+    kind: negated_boolean
+    weight: 0.25
+aggregation:
+  within_step: weighted_sum
+  missing_signal: invalid_for_training_label
+  discount_source: critic_training_config
+unavailable_terms:
+  - min_distance
+  - min_ttc
+  - max_drac
+  - near_miss
+claim_boundary:
+  derive_missing_ttc_or_drac: false
+  definition_alone_is_empirical_evidence: false

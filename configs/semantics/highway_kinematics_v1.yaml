@@ -1,0 +1,39 @@
+schema_version: rl_attack.p4_highway_runtime_semantics.v1
+name: highway_kinematics_runtime_v1
+status: runtime_descriptor_required
+environment_family: highway_env
+policy_input:
+  source: runtime_observation_descriptor
+  raw_rank: 2
+  flatten_order: C
+  layout: vehicle_rows_by_feature_columns
+  require_exact_box_bounds: true
+  presence_feature: presence
+  active_rows_precede_padding: true
+action_mapping:
+  LANE_LEFT: 0
+  IDLE: 1
+  LANE_RIGHT: 2
+  FASTER: 3
+  SLOWER: 4
+action_semantics: sparse_five_action_not_factorial_grid
+projection:
+  epsilon_by_feature_source: resolved_experiment
+  freeze_presence_column: true
+  freeze_presence_zero_rows: true
+  discrete_edits_supported: false
+  immutable_features: []
+safety_signal_boundary:
+  available_from_supported_contract:
+    - crashed
+    - on_road
+  unavailable_without_explicit_environment_info:
+    - min_distance
+    - min_ttc
+    - max_drac
+    - near_miss
+  derive_ttc_from_policy_input: false
+  derive_drac_from_policy_input: false
+claim_boundary:
+  guarantee: runtime_schema_consistent_not_physically_realizable
+  physically_realizable: false

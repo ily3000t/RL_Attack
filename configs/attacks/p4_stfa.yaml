@@ -1,0 +1,59 @@
+schema_version: rl_attack.p4_stfa_method.v1
+name: stfa
+status: implementation_completed
+threat_model:
+  stage: test_time_observation
+  victim: frozen_categorical_policy
+  knowledge: white_box
+  policy_action_mode: deterministic_argmax
+  policy_input_only: true
+  simulator_state_mutation: false
+action_target:
+  representation: lateral_longitudinal_factorization
+  target_is_not_actual_action: true
+temporal_budget:
+  k: 8
+  min_gap: 2
+  window_size: null
+  window_k: null
+optimizer:
+  steps: 20
+  restarts: 5
+  random_start: true
+  step_size: null
+  objective_variant: full
+  objective_weights:
+    expected_safety_cost: 1.0
+    joint_target_margin: 1.0
+    lateral_target_margin: 0.5
+    longitudinal_target_margin: 0.5
+    ce_mad: 1.0
+    margin_kappa: 0.0
+defense_adaptation:
+  mode: transfer
+  eot_samples: 1
+  require_eot_sample_diversity: true
+  bpda_surrogate: null
+discrete_search:
+  enabled: false
+  budget_per_candidate: 0
+  maximum_candidates: 0
+  enumeration: deterministic_single_field_legal_grid_neighbors
+  allowlist: []
+accounting:
+  separate:
+    - continuous_linf
+    - continuous_l2
+    - discrete_edit_cost
+    - temporal_selected_steps
+    - temporal_nonzero_steps
+    - policy_observation_queries
+    - input_gradient_queries
+    - projection_queries
+    - critic_queries
+    - director_queries
+    - defense_transform_queries
+claim_boundary:
+  projector_guarantee: policy_input_schema_only_not_physical_realizability
+  training_manifest_is_formal_evaluation: false
+  empirical_effectiveness_established: false

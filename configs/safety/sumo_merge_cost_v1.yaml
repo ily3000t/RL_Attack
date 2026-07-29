@@ -1,0 +1,43 @@
+schema_version: rl_attack.p4_safety_cost_definition.v1
+name: sumo_merge_cost_v1
+environment_family: sumo_merge_core_v1
+metric_version: oriented_box_v1
+units: dimensionless_additive_cost
+source: environment_info_only
+required_version_field:
+  key: safety_metric_version
+  value: oriented_box_v1
+version_mismatch: fail_closed
+terms:
+  collision:
+    source_key: collision
+    kind: boolean
+    weight: 1.0
+  taper_miss:
+    source_key: taper_miss
+    kind: boolean
+    weight: 0.75
+  near_miss:
+    source_key: near_miss
+    kind: boolean
+    weight: 0.25
+  low_ttc:
+    source_key: low_ttc
+    kind: boolean
+    weight: 0.15
+  high_drac:
+    source_key: high_drac
+    kind: boolean
+    weight: 0.10
+  hard_brake:
+    source_key: hard_brake
+    kind: boolean
+    weight: 0.05
+aggregation:
+  within_step: weighted_sum
+  missing_signal: invalid_for_training_label
+  discount_source: critic_training_config
+claim_boundary:
+  geometric_metrics_are_environment_owned: true
+  derive_missing_ttc_or_drac: false
+  definition_alone_is_empirical_evidence: false

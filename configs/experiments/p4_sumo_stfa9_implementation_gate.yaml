@@ -1,0 +1,235 @@
+# IMPLEMENTATION GATE ONLY — READY: false; FORMAL RUN REQUIRED: false.
+# Blockers: the audit intentionally has no production SUMO constructor yet;
+# no stable immutable SUMO PPO victim exists; critic/director bindings below
+# are unresolved. All-zero digests are explicit external-artifact sentinels.
+schema_version: rl_attack.p4_stfa_audit.v1
+name: p4_sumo_stfa9_implementation_gate_not_ready
+environment:
+  id: sumo_merge_core_v1
+  max_episode_steps: 160
+  registry_key: sumo_merge_core_v1
+  factory: rl_attack.envs.sumo_merge.env:SumoHighwayMergeEnv
+  runtime_type: rl_attack.envs.sumo_merge.env.SumoHighwayMergeEnv
+  contract_sha256: ecf12fee470a6f7775708db5962f4116f72951100bdfb042672836af3618b4f2
+  normalization_contract_sha256: 98420a10fbbdd5f90e7479b58c83dbe3f157187c8e3238934843add383771244
+  scenario_assets:
+    - role: sumocfg
+      path: ../../scenarios/highway_merge/v1/highway_merge.sumocfg
+      sha256: 5ca47390e28966e617ab3c9af8738fbf303b9abeed61013de890e36827b55aa7
+    - role: net
+      path: ../../scenarios/highway_merge/v1/highway_merge.net.xml
+      sha256: bcb5a62c9875e72f98c03de4c0e9dc7bc568df0d1649e5a9c29abe7b149888f9
+    - role: route
+      path: ../../scenarios/highway_merge/v1/highway_merge.rou.xml
+      sha256: bdfb7cd98dead51bdcc175a604aa1753b2718c063d4454e686acfa294d1b2572
+  observation_space:
+    type: Box
+    shape: [52]
+    dtype: float32
+    low:
+      # ego (8)
+      - -.inf
+      - -.inf
+      - -.inf
+      - -.inf
+      - -.inf
+      - -.inf
+      - -.inf
+      - -.inf
+      # neighbor 0 (8)
+      - -.inf
+      - -.inf
+      - -.inf
+      - -.inf
+      - -.inf
+      - -.inf
+      - -.inf
+      - -.inf
+      # neighbor 1 (8)
+      - -.inf
+      - -.inf
+      - -.inf
+      - -.inf
+      - -.inf
+      - -.inf
+      - -.inf
+      - -.inf
+      # neighbor 2 (8)
+      - -.inf
+      - -.inf
+      - -.inf
+      - -.inf
+      - -.inf
+      - -.inf
+      - -.inf
+      - -.inf
+      # neighbor 3 (8)
+      - -.inf
+      - -.inf
+      - -.inf
+      - -.inf
+      - -.inf
+      - -.inf
+      - -.inf
+      - -.inf
+      # neighbor 4 (8)
+      - -.inf
+      - -.inf
+      - -.inf
+      - -.inf
+      - -.inf
+      - -.inf
+      - -.inf
+      - -.inf
+      # merge (4)
+      - -.inf
+      - -.inf
+      - -.inf
+      - -.inf
+    high:
+      # ego (8)
+      - .inf
+      - .inf
+      - .inf
+      - .inf
+      - .inf
+      - .inf
+      - .inf
+      - .inf
+      # neighbor 0 (8)
+      - .inf
+      - .inf
+      - .inf
+      - .inf
+      - .inf
+      - .inf
+      - .inf
+      - .inf
+      # neighbor 1 (8)
+      - .inf
+      - .inf
+      - .inf
+      - .inf
+      - .inf
+      - .inf
+      - .inf
+      - .inf
+      # neighbor 2 (8)
+      - .inf
+      - .inf
+      - .inf
+      - .inf
+      - .inf
+      - .inf
+      - .inf
+      - .inf
+      # neighbor 3 (8)
+      - .inf
+      - .inf
+      - .inf
+      - .inf
+      - .inf
+      - .inf
+      - .inf
+      - .inf
+      # neighbor 4 (8)
+      - .inf
+      - .inf
+      - .inf
+      - .inf
+      - .inf
+      - .inf
+      - .inf
+      - .inf
+      # merge (4)
+      - .inf
+      - .inf
+      - .inf
+      - .inf
+    contract_sha256: a6de6232ede7215ce6d4c2775ab5a630fb1b96b1767b355c87306bbc5db9ecbc
+  action_space:
+    type: Discrete
+    n: 9
+    start: 0
+    dtype: int64
+    contract_sha256: 600b8138f4709f00d7d44b966ab8a6339d55c1d58ce6e42c5ee7ddf6a50639e2
+victim:
+  name: unresolved_sumo_sb3_ppo
+  algorithm: stable_baselines3.PPO
+  checkpoint: ../../outputs/p4_inputs/REPLACE_SUMO_VICTIM.zip
+  checkpoint_sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+  policy_state_sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+action_factorization:
+  name: sumo_highway_merge_3x3
+  version: p4-action-factors-v1
+  actions:
+    - {index: 0, lateral: -1, longitudinal: -1, label: right_decelerate, available: true}
+    - {index: 1, lateral: -1, longitudinal: 0, label: right_hold, available: true}
+    - {index: 2, lateral: -1, longitudinal: 1, label: right_accelerate, available: true}
+    - {index: 3, lateral: 0, longitudinal: -1, label: keep_decelerate, available: true}
+    - {index: 4, lateral: 0, longitudinal: 0, label: keep_hold, available: true}
+    - {index: 5, lateral: 0, longitudinal: 1, label: keep_accelerate, available: true}
+    - {index: 6, lateral: 1, longitudinal: -1, label: left_decelerate, available: true}
+    - {index: 7, lateral: 1, longitudinal: 0, label: left_hold, available: true}
+    - {index: 8, lateral: 1, longitudinal: 1, label: left_accelerate, available: true}
+  ontology_sha256: b3dddbce9c47b0160cb8741367e06cf069c63b25ca5eae340470261a331ce222
+  contract_sha256: 5f7a1d5cb30a7be45c0ec5e45aeba629a93aec67a6cd4bb773aed7d51d065e26
+semantic_projector:
+  name: sumo_merge_core_v1_semantic
+  version: sumo_merge_core_v1
+  factory: rl_attack.experiments.p4_audit:build_sumo_merge_v1_projector
+  factory_kwargs: {}
+  observation_shape: [52]
+  config: ../semantics/sumo_merge_v1.yaml
+  config_sha256: ebbe5d0e540e1272c15ab5bb65994308f72b3b18b520877ae8e1188a0b88bd17
+  contract_sha256: 1e513a4c23970e7c4127726f5a2e30c4fe8e47161b10625011ef8b62b2bd020c
+  guarantee: policy_input_schema_only_not_physical_realizability
+safety:
+  cost_definition_sha256: e3c0961fefd01e7952a06fd92916940861d177346a1ff34088227573cc4f6c4e
+artifacts:
+  safety_critic:
+    checkpoint: ../../outputs/p4_inputs/REPLACE_SUMO_CRITIC.pt
+    checkpoint_sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+    manifest: ../../outputs/p4_inputs/REPLACE_SUMO_CRITIC.pt.manifest.json
+    manifest_sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+    artifact_type: stfa_safety_critic_checkpoint_manifest
+  director:
+    checkpoint: ../../outputs/p4_inputs/REPLACE_SUMO_DIRECTOR.pt
+    checkpoint_sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+    manifest: ../../outputs/p4_inputs/REPLACE_SUMO_DIRECTOR.pt.manifest.json
+    manifest_sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+    artifact_type: stfa_director_checkpoint_manifest
+attack:
+  name: stfa
+  factory: rl_attack.experiments.p4_audit:build_stfa_attack
+  factory_kwargs:
+    steps: 20
+    restarts: 5
+    random_start: true
+    objective_variant: full
+    timing_mode: director
+    defense_mode: transfer
+    eot_samples: 1
+    discrete_budget: 1
+    max_candidates: 10
+  temporal_budget:
+    k: 8
+    min_gap: 2
+    window_size: null
+    window_k: null
+  discrete_planner:
+    registry_key: sumo_merge_core_v1
+    # Neighbor relative-lane fields only; flags and ego semantics remain frozen.
+    allowlist: [11, 19, 27, 35, 43]
+fairness:
+  episode_seeds: [32001, 32002, 32003, 32004]
+  attack_base_seed: 42000000
+  paired_clean_attacked: true
+  victim_action_mode: deterministic_argmax
+  rng_derivation: p4-stfa-rng-v1
+evidence_scope:
+  algorithm_contract: true
+  sb3_9action_integration: false
+  sumo_contract_integration: false
+  sumo_empirical_effectiveness: false
+  sumo_empirical_effectiveness_reason: "Implementation gate not ready: production SUMO constructor, stable victim, and bound learned artifacts are pending."
