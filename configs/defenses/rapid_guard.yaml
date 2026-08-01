@@ -1,0 +1,216 @@
+# Method-level P5 contract. A formal run must resolve every null value, pin the
+# resulting configuration, and bind it into the defense bundle and audit rows.
+schema_version: rl_attack.p5_rapid_guard_method.v1
+name: rapid_guard
+display_name: Risk-Aware Policy-Invariance Defense
+status: implementation_contract_completed
+empirical_status: pending_frozen_public_driving_cohorts
+
+scope:
+  stage: test_time_observation_defense
+  victim: frozen_sb3_categorical_ppo
+  stateful_per_episode: true
+  policy_input_only: true
+  simulator_state_mutation: false
+  physical_realizability_certified: false
+
+detector:
+  active_channels:
+    - temporal_innovation
+    - categorical_js
+    - ibp_margin_deficit
+  temporal_model: three_frame_constant_velocity_rms
+  reference_semantics: previous_trusted_policy_input
+  categorical_divergence: jensen_shannon_natural_log
+  ibp_channel: clean_greedy_action_margin_deficit
+  required_margin: 0.0
+  fusion:
+    kind: deterministic_full_batch_logistic
+    gradient_steps: 500
+    learning_rate: 0.05
+    l2_penalty: 0.001
+    scale_floor: 1.0e-8
+    fit_attack_families:
+      - p3_pa_ad
+      - p3_robust_sarsa
+      - p4_stfa
+  calibration:
+    kind: clean_episode_max_split_conformal
+    alpha: 0.10
+    threshold_selection_split: validation
+    test_access: false
+    exchangeability_required_for_coverage_interpretation: true
+
+certificate:
+  implementation: one_step_ibp
+  epsilon: null
+  epsilon_must_resolve_in_policy_input_units: true
+  scope: clean_greedy_action_invariance_only
+  supported_actor: sb3_discrete_feed_forward_mlp
+  unsupported_actor_result: unavailable
+  certifies_episode_return: false
+  certifies_closed_loop_safety: false
+  certifies_physical_realizability: false
+
+trusted_anchor:
+  score_before_update: true
+  update_after_complete_step_validation: true
+  accepted_updates:
+    - detector_pass_through
+    - accepted_redetected_purification
+  rejected_updates:
+    - suspicious_observation
+    - fallback
+    - failed_component
+    - failed_shield_arbitration
+  reset_at_episode_boundary: true
+  state_shared_between_paired_rollouts: false
+
+history_bootstrap:
+  mode: strict_calibrated_v1
+  window_frames: 3
+  prior_trusted_frames: 2
+  minimum_prefix_frames: 2
+  bootstrap: caller_attested_attack_free_trusted_prefix
+  require_consecutive_steps: true
+  repeated_first_bootstrap_allowed: false
+  no_or_single_frame_behavior: uncalibrated_warmup_fail_closed_before_policy_or_ibp
+  on_gap: uncalibrated_warmup_fail_closed_until_explicit_rebootstrap
+  fallback_invalidates_continuity: true
+  episode_scope: current_episode_only
+  cross_episode_reuse: false
+  first_step_attack_evaluation: fallback_cost_reported_separately
+  hash_bound_to_bundle: true
+
+purifier:
+  kind: deterministic_semantic_temporal_line_search
+  temporal_radius: null
+  line_search_points: 5
+  envelope_atol: 2.0e-6
+  semantic_projector_contract_sha256: null
+  optional_proposal_transform:
+    kind: frozen_residual_denoiser
+    hidden_sizes: [128, 128]
+    activation: relu
+    binding_required: true
+    output_requires_projection: true
+    guarantee_scope: unprojected_policy_input_proposal_only
+  guarantee_scope: policy_input_schema_and_temporal_envelope_only
+  physical_realizability_certified: false
+
+fallback:
+  legal_action_mask_required: true
+  preferred_actions: []
+  trusted_safety_cost_critic:
+    optional: true
+    full_artifact_binding_required_before_query: true
+  unverified_or_failed_critic_behavior: deterministic_static_legal_fallback
+  tie_break: lowest_legal_action_index
+  guarantee_scope: legal_action_selection_only
+  safety_guarantee: false
+
+safety_shield:
+  optional: true
+  treated_as_separate_layer: true
+  artifact_binding_required_for_cost_proxy: true
+  failure_behavior: legal_fallback_and_anchor_rollback
+
+training:
+  raw_npz_only: true
+  allow_pickle: false
+  cached_policy_or_ibp_features_allowed: false
+  victim_features_recomputed_from_frozen_checkpoint: true
+  fit_split: train
+  threshold_calibration_split: validation
+  reserved_test_consumed: false
+  episode_and_scenario_split_disjointness_required: true
+  temporal_windows_may_cross_episode_or_scenario: false
+  attack_exposure:
+    required_families:
+      - p3
+      - p4
+  output_scope: training_plumbing_not_formal_robustness_result
+
+adaptive_attack_evaluation:
+  required_matrix:
+    clean:
+      - Clean
+    non_adaptive:
+      - FGSM
+      - PGD
+      - MAD
+      - Robust-Sarsa
+      - PA-AD
+      - STFA
+    defense_aware:
+      - FGSM
+      - PGD
+      - MAD
+      - Robust-Sarsa
+      - PA-AD
+      - STFA
+  hard_gate_gradient: nondifferentiable
+  exact_end_to_end_gradient_claimed: false
+  required_adaptive_checks:
+    - direct_gradient_where_supported
+    - bpda_with_explicit_surrogate
+    - eot_for_genuine_randomness
+    - transfer_or_score_query_sanity_check
+    - step_restart_eot_and_query_convergence
+  attacker_training_split: attacker_train
+  attacker_artifact_must_bind_frozen_defense: true
+  failed_or_missing_cell_invalidates_worst_case_summary: true
+
+accounting:
+  non_fungible_components:
+    - environment_steps
+    - victim_policy_calls
+    - detector_calls
+    - detector_policy_calls
+    - proposal_calls
+    - semantic_projection_calls
+    - purification_attempts
+    - purifier_calls
+    - certificate_calls
+    - certificate_policy_calls
+    - ibp_bound_calls
+    - safety_critic_calls
+    - fallback_calls
+    - shield_calls
+    - defense_transform_calls
+    - attacker_victim_forward_queries
+    - attacker_victim_backward_queries
+    - attacker_defense_forward_queries
+    - attacker_defense_backward_queries
+    - attacker_eot_samples
+    - attacker_bpda_surrogate_calls
+    - attacker_simulator_calls
+  unified_total_query_budget: false
+
+falsifiable_hypotheses:
+  h1:
+    claim: fused_detector_improves_held_out_attack_detection_at_preregistered_clean_fpr
+    status: empirical_test_pending
+  h2:
+    claim: purifier_improves_policy_recovery_or_fixed_safety_cost_on_held_out_attacks_with_bounded_clean_distortion
+    status: empirical_test_pending
+  h3:
+    claim: full_guard_improves_episode_wise_worst_safety_and_utility_subject_to_clean_cost_and_latency_limits
+    status: empirical_test_pending
+
+evidence_scope:
+  algorithm_contract: true
+  sb3_integration: true
+  public_driving_contract: false
+  public_driving_empirical_effectiveness: false
+  sumo_contract: false
+  sumo_empirical_effectiveness: false
+  sumo_empirical_effectiveness_reason: stable_immutable_sumo_ppo_victim_not_available
+
+claim_boundary:
+  implementation_completed_is_empirical_robustness: false
+  training_manifest_is_formal_evaluation: false
+  detector_score_is_safety_certificate: false
+  purifier_output_is_physically_realizable: false
+  fallback_is_safety_certified: false
+  strongest_defense_or_attack_claimed: false

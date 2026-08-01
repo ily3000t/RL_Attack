@@ -6,10 +6,13 @@ from rl_attack.defenses.catalog import (
     ReproductionLevel,
     defense_method,
 )
+from rl_attack.defenses.rapid_guard import RapidGuard, RapidGuardArtifact
 
 __all__ = [
     "DEFENSE_METHODS",
     "DefenseMethodSpec",
+    "RapidGuard",
+    "RapidGuardArtifact",
     "ReproductionLevel",
     "defense_method",
 ]

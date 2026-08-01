@@ -1,0 +1,187 @@
+# UNRESOLVED IMPLEMENTATION-GATE TEMPLATE.
+# This file is deliberately not a valid rl_attack.p5_rapid_guard_audit.v2
+# configuration. Do not pass it to load_p5_audit_config, execute it, or cite it
+# as empirical evidence. Resolve every sentinel in a separate frozen audit
+# configuration and validate that copy with the strict formal loader.
+schema_version: rl_attack.p5_rapid_guard_implementation_gate_template.v1
+name: p5_synthetic_9action_implementation_gate_unresolved
+
+template_status:
+  state: unresolved
+  runnable: false
+  formal_loader_allowed: false
+  citable_as_empirical_evidence: false
+  target_audit_schema: rl_attack.p5_rapid_guard_audit.v2
+  zero_sha256_sentinel: "0000000000000000000000000000000000000000000000000000000000000000"
+  blockers:
+    - frozen_victim_bundle_missing
+    - frozen_rapid_guard_bundle_missing
+    - real_online_row_producer_manifest_missing
+    - defense_aware_attacker_bundles_missing
+    - preregistered_multiseed_test_rows_missing
+
+environment:
+  id: SyntheticNineAction-v0
+  kind: contract_test_fixture_only
+  max_episode_steps: 64
+  observation_space:
+    type: Box
+    shape: [2]
+    dtype: float32
+    low: [-1.0, -1.0]
+    high: [1.0, 1.0]
+    contract_sha256: 7f8c6b1a9dc7cd7a4f82e77e6c3fd2087227c282b2a2b3fba676b3d465f6b384
+  action_space:
+    type: Discrete
+    n: 9
+    start: 0
+    dtype: int64
+    contract_sha256: 600b8138f4709f00d7d44b966ab8a6339d55c1d58ce6e42c5ee7ddf6a50639e2
+  normalization_contract_sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+
+action_ontology:
+  name: sumo_highway_merge_3x3
+  version: p4-action-factors-v1
+  labels:
+    - right_decelerate
+    - right_hold
+    - right_accelerate
+    - keep_decelerate
+    - keep_hold
+    - keep_accelerate
+    - left_decelerate
+    - left_hold
+    - left_accelerate
+  ontology_sha256: b3dddbce9c47b0160cb8741367e06cf069c63b25ca5eae340470261a331ce222
+  availability_contract_sha256: 5f7a1d5cb30a7be45c0ec5e45aeba629a93aec67a6cd4bb773aed7d51d065e26
+
+semantic_projector:
+  name: synthetic_2d_policy_input
+  path: ../semantics/synthetic_2d_v1.yaml
+  file_sha256: 756f0eed8588a16f031a925e01a08eadd150c4c847ca0bd319a387865668b317
+  contract_sha256: 4746ebffc737fac62e313e370a32cc4cc0ac086dce5baaaeb565601939566b73
+  guarantee: policy_input_schema_only_not_physical_realizability
+
+method:
+  name: rapid_guard
+  config: ../defenses/rapid_guard.yaml
+  victim: frozen_sb3_categorical_ppo
+  detector:
+    channels:
+      - temporal_innovation
+      - categorical_js
+      - ibp_margin_deficit
+    threshold_split: validation_clean_episode_max
+    threshold_may_use_test: false
+    attack_exposed_fit_requires_p3_and_p4: true
+  purifier:
+    fit_split: train_only
+    output_projection_required: true
+    unseen_attack_test_required: true
+    physical_realizability_certified: false
+  certificate:
+    horizon: one_step
+    scope: clean_greedy_action_invariance_only
+    unsupported_actor_result: unavailable
+    certifies_return_or_closed_loop_safety: false
+  anchor:
+    score_before_update: true
+    reset_each_episode: true
+    suspicious_or_fallback_update_allowed: false
+    history_bootstrap_mode: strict_calibrated_v1
+    bootstrap_source: caller_attested_attack_free_trusted_prefix
+    prior_trusted_frames: 2
+    consecutive_steps_required: true
+    repeated_first_bootstrap_allowed: false
+    uncalibrated_warmup_behavior: fail_closed_before_policy_or_ibp
+    fallback_history_behavior: invalidate_until_explicit_rebootstrap
+  fallback:
+    legal_action_required: true
+    no_oracle_or_future_information: true
+    safety_certified: false
+
+formal_evaluation:
+  split_roles:
+    detector_and_purifier_fit: train
+    clean_threshold_calibration: validation
+    adaptive_attacker_training: attacker_train
+    hypotheses_and_final_metrics: test
+    cohorts_must_be_disjoint: true
+    temporal_windows_may_cross_episode_or_scenario: false
+  required_cells:
+    - {attack: Clean, adaptivity: clean}
+    - {attack: FGSM, adaptivity: non_adaptive}
+    - {attack: FGSM, adaptivity: defense_aware}
+    - {attack: PGD, adaptivity: non_adaptive}
+    - {attack: PGD, adaptivity: defense_aware}
+    - {attack: MAD, adaptivity: non_adaptive}
+    - {attack: MAD, adaptivity: defense_aware}
+    - {attack: Robust-Sarsa, adaptivity: non_adaptive}
+    - {attack: Robust-Sarsa, adaptivity: defense_aware}
+    - {attack: PA-AD, adaptivity: non_adaptive}
+    - {attack: PA-AD, adaptivity: defense_aware}
+    - {attack: STFA, adaptivity: non_adaptive}
+    - {attack: STFA, adaptivity: defense_aware}
+  missing_or_failed_cell_invalidates_robust_summary: true
+  worst_case_endpoints_are_independent:
+    - minimum_episode_return
+    - maximum_collision_count
+    - maximum_near_miss_count
+    - maximum_safety_cost
+  accounting:
+    components_are_non_fungible: true
+    unified_total_query_budget: false
+    components:
+      - environment_steps
+      - victim_policy_calls
+      - detector_calls
+      - detector_policy_calls
+      - proposal_calls
+      - semantic_projection_calls
+      - purification_attempts
+      - purifier_calls
+      - certificate_calls
+      - certificate_policy_calls
+      - ibp_bound_calls
+      - safety_critic_calls
+      - fallback_calls
+      - shield_calls
+      - defense_transform_calls
+      - attacker_victim_forward_queries
+      - attacker_victim_backward_queries
+      - attacker_defense_forward_queries
+      - attacker_defense_backward_queries
+      - attacker_eot_samples
+      - attacker_bpda_surrogate_calls
+      - attacker_simulator_calls
+
+unresolved_external_inputs:
+  rows:
+    path: ../../outputs/p5_inputs/REPLACE_SYNTHETIC_EPISODES.jsonl
+    sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+  producer_manifest:
+    path: ../../outputs/p5_inputs/REPLACE_SYNTHETIC_PRODUCER.manifest.json
+    sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+  victim_bundle:
+    path: ../../outputs/p5_inputs/REPLACE_SYNTHETIC_VICTIM.zip
+    sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+  rapid_guard_bundle:
+    path: ../../outputs/p5_inputs/REPLACE_SYNTHETIC_RAPID_GUARD.pt
+    sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+  adaptive_attacker_manifests:
+    FGSM: "0000000000000000000000000000000000000000000000000000000000000000"
+    PGD: "0000000000000000000000000000000000000000000000000000000000000000"
+    MAD: "0000000000000000000000000000000000000000000000000000000000000000"
+    Robust-Sarsa: "0000000000000000000000000000000000000000000000000000000000000000"
+    PA-AD: "0000000000000000000000000000000000000000000000000000000000000000"
+    STFA: "0000000000000000000000000000000000000000000000000000000000000000"
+
+evidence_scope:
+  algorithm_contract: true
+  sb3_integration: true
+  public_driving_contract: false
+  public_driving_empirical_effectiveness: false
+  sumo_contract: false
+  sumo_empirical_effectiveness: false
+  sumo_empirical_effectiveness_reason: unresolved_synthetic_implementation_template_only
+  empirical_robustness_result: false

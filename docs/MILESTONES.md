@@ -84,7 +84,7 @@ tested. The statistical gate remains pending. In particular, no stable SUMO PPO
 victim is available, so neither SUMO empirical effectiveness nor superiority
 over P3 attacks is claimed.
 
-## P5 — proposed defense
+## P5 — RAPID-Guard proposed defense (implementation completed)
 
 Risk-Aware Policy-Invariance Defense (working name `RAPID-Guard`):
 
@@ -100,6 +100,29 @@ Risk-Aware Policy-Invariance Defense (working name `RAPID-Guard`):
 Required ablations: detector channels, purifier, adversarial training,
 certificate signal, fallback layer, adaptive white-box attack, clean
 performance cost, latency, and worst-over-attacks.
+
+Implementation status: detector/fusion, clean episode-maximum conformal
+calibration, strict raw-only training, a frozen residual proposal,
+semantic-temporal purification, transactional trusted anchors, legal fallback,
+strict consecutive trusted-prefix bootstrap with pre-policy/IBP fail-closed
+warm-up, optional shield arbitration, bundle-only runtime cross-binding, and a
+fail-closed P1/P3/P4 audit contract are implemented and tested.
+
+The empirical gate remains pending and is intentionally falsifiable:
+
+- H1 tests fused detection on held-out attacks at a pre-registered clean
+  false-positive operating point;
+- H2 tests policy/safety recovery from purification subject to clean
+  distortion and task-cost limits;
+- H3 tests complete-Guard episode-wise worst safety and utility subject to
+  clean-cost and latency limits.
+
+All three require frozen public-driving victim/defense cohorts, disjoint
+train/validation/attacker-train/test splits, converged defense-aware attacks,
+paired confidence intervals, and registered failure rules. Implementation
+evidence, training manifests, and synthetic integration runs do not establish
+any hypothesis. No stable SUMO PPO victim exists, so SUMO empirical
+effectiveness remains forced false.
 
 ## P6 — SUMO and layered validation
 

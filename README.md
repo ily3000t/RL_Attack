@@ -64,6 +64,28 @@ not yet available, so no SUMO effectiveness or strongest-attack result is
 claimed. Contract: [`docs/contracts/p4_stfa.md`](docs/contracts/p4_stfa.md).
 Release record: [`docs/releases/P4.md`](docs/releases/P4.md).
 
+Phase P5 RAPID-Guard implementation and audit contracts are complete:
+
+- a detector fusing temporal innovation, categorical policy divergence, and
+  scoped one-step IBP margin evidence;
+- clean episode-level split-conformal calibration with disjoint fit,
+  validation, attacker-training, and test cohorts;
+- semantic-temporal policy-input purification with a frozen learned proposal;
+- a strict caller-attested, consecutive trusted-prefix bootstrap with
+  fail-closed uncalibrated warm-up;
+- transactional trusted anchors and an explicit legal-action fallback that
+  invalidates temporal continuity until explicit rebootstrap;
+- a complete P1/P3/P4 non-adaptive and defense-aware audit matrix with
+  independent episode-wise worst safety and utility endpoints.
+
+This is an implementation and contract milestone, not an empirical robustness
+result. The H1 detector, H2 purifier, and H3 complete-Guard hypotheses still
+require frozen public-driving cohorts, converged adaptive attacks, and paired
+confidence intervals. A stable SUMO PPO victim is not yet available, so SUMO
+empirical effectiveness remains explicitly false. Contract:
+[`docs/contracts/p5_rapid_guard.md`](docs/contracts/p5_rapid_guard.md).
+Release record: [`docs/releases/P5.md`](docs/releases/P5.md).
+
 The current attack track is **test-time observation evasion**. Action-channel
 attacks, reward/rollout poisoning, parameter attacks, and backdoors will be
 implemented as separate tracks so their threat models are not mixed.
@@ -101,11 +123,17 @@ rl-attack-baseline --env-id CartPole-v1 --load-model artifacts/cartpole/model.zi
 rl-attack-defense --method sa_ppo --env-id CartPole-v1 --timesteps 50000 `
   --epsilon 0.02 --attack pgd --attack-steps 10
 rl-attack-p4-audit <resolved-p4-config.yaml> --output-dir outputs/p4_stfa_audit
+rl-attack-train-rapid-guard train --help
+rl-attack-train-rapid-guard verify --help
+rl-attack-p5-audit <resolved-p5-config.yaml> `
+  --output-dir outputs/p5_rapid_guard_audit
 ```
 
-The CLI is a correctness smoke path, not the final statistical experiment
-runner. Final results must use frozen victim sets, paired test seeds, and the
-protocol in `configs/experiments`.
+The RAPID-Guard training help lists every mandatory pinned input and expected
+digest; there is intentionally no shorthand that bypasses those bindings. The
+CLI is a correctness smoke path, not the final statistical experiment runner.
+Final results must use frozen victim sets, paired test seeds, and the protocol
+in `configs/experiments`.
 
 ## Verification
 

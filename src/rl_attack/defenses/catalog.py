@@ -87,6 +87,20 @@ DEFENSE_METHODS: dict[str, DefenseMethodSpec] = {
             "one-step policy certificate does not certify return or safety."
         ),
     ),
+    "rapid_guard": DefenseMethodSpec(
+        key="rapid_guard",
+        display_name="RAPID-Guard",
+        reproduction_level=ReproductionLevel.NATIVE,
+        training_objective=(
+            "Attack-exposed three-channel detector with clean episode-level "
+            "split-conformal calibration and a frozen residual purification proposal"
+        ),
+        limitations=(
+            "P5 native proposed defense. Its IBP component is limited to one-step "
+            "clean greedy-action invariance; implementation evidence does not certify "
+            "return, safety, physical realizability, or empirical robustness."
+        ),
+    ),
 }
 
 

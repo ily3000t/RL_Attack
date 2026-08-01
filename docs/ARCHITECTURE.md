@@ -66,6 +66,59 @@ under ignored output/artifact locations and are referenced by exact hashes in
 run-specific resolved configs. The checked-in P4 experiment files are templates,
 not mutable pointers into WCDT.
 
+## P5 RAPID-Guard boundaries
+
+P5 wraps, but never mutates, a frozen categorical victim:
+
+```text
+raw fixed cohorts + sidecars
+        |
+        +--> frozen victim recomputation --> detector fit
+        |                                  + clean conformal calibration
+        |
+        +--> clean targets + trusted inputs --> residual proposal fit
+                                                   |
+                                                   v
+environment policy input --> detector --> semantic-temporal purifier
+                                  |                 |
+                                  +-----------------+
+                                           |
+                                           v
+                             victim / legal fallback / optional shield
+                                           |
+                                           v
+                              immutable episode-row audit export
+```
+
+The raw datasets do not cache policy probabilities, logits, IBP bounds, or
+detector features. These are recomputed from the exact frozen victim. Fit and
+calibration datasets, episode/scenario splits, normalizer, action ontology,
+environment, projector, IBP radius, anchor rule, purifier, and fallback are
+cross-bound into the bundle.
+
+The Guard owns one transactional anchor/history per episode. Detection occurs
+before any state update. Calibrated detection requires a caller-attested,
+attack-free prefix containing at least two consecutive trusted frames from the
+current episode; a repeated-first window is never synthesized. With no or only
+one trusted frame, preflight fails closed before victim-policy or IBP queries
+and reports the fallback cost outside H1 coverage. Only validated pass-through
+and accepted purification can commit trusted state. Fallback preserves the last
+trusted anchor but invalidates temporal continuity until an explicit, bound
+trusted-prefix rebootstrap. Paired clean, non-adaptive, and defense-aware
+rollouts must use independent Guard instances.
+
+The denoiser produces an unprojected proposal only. The purifier's strongest
+guarantee is policy-input schema and temporal-envelope consistency. The
+fallback guarantees legal action selection only. IBP certifies a supported
+actor's one-step clean greedy action only. None proves physical realizability,
+episode return, collision avoidance, or closed-loop safety.
+
+The P5 offline audit is downstream of a real evaluation harness. It aggregates
+hash-pinned rows and cannot manufacture online SUMO evidence. Dependency
+injection is a test seam and permanently disables robustness eligibility. See
+[`contracts/p5_rapid_guard.md`](contracts/p5_rapid_guard.md) for the complete
+claim and artifact boundary.
+
 ## Victim import contract
 
 A future WCDT checkpoint is accepted only as a versioned victim bundle:

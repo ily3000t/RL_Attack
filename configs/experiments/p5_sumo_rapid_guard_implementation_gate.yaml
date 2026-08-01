@@ -1,0 +1,216 @@
+# UNRESOLVED IMPLEMENTATION-GATE TEMPLATE.
+# This file pins the local SUMO snapshot contracts, but it is deliberately not
+# a valid rl_attack.p5_rapid_guard_audit.v2 configuration. Do not pass it to
+# load_p5_audit_config, execute it, or cite it as empirical evidence. A formal
+# copy must replace every external sentinel and pass the strict loader.
+schema_version: rl_attack.p5_rapid_guard_implementation_gate_template.v1
+name: p5_sumo_rapid_guard_implementation_gate_unresolved
+
+template_status:
+  state: unresolved
+  runnable: false
+  formal_loader_allowed: false
+  citable_as_empirical_evidence: false
+  target_audit_schema: rl_attack.p5_rapid_guard_audit.v2
+  zero_sha256_sentinel: "0000000000000000000000000000000000000000000000000000000000000000"
+  blockers:
+    - stable_immutable_sumo_ppo_victim_missing
+    - frozen_sumo_rapid_guard_bundle_missing
+    - real_online_sumo_row_producer_manifest_missing
+    - defense_aware_attacker_bundles_missing
+    - preregistered_multiseed_sumo_test_rows_missing
+
+environment:
+  id: sumo_merge_core_v1
+  factory: rl_attack.envs.sumo_merge.env:SumoHighwayMergeEnv
+  runtime_type: rl_attack.envs.sumo_merge.env.SumoHighwayMergeEnv
+  config:
+    path: ../envs/sumo_merge_core_v1.yaml
+    file_sha256: fd5aef6fe7d3271104e7e8ea7ff86f1cb9e3e1e608b768c4636ea02441fd4a5a
+    contract_sha256: ecf12fee470a6f7775708db5962f4116f72951100bdfb042672836af3618b4f2
+  observation_space:
+    type: Box
+    shape: [52]
+    dtype: float32
+    contract_sha256: a6de6232ede7215ce6d4c2775ab5a630fb1b96b1767b355c87306bbc5db9ecbc
+  action_space:
+    type: Discrete
+    n: 9
+    start: 0
+    dtype: int64
+    contract_sha256: 600b8138f4709f00d7d44b966ab8a6339d55c1d58ce6e42c5ee7ddf6a50639e2
+  normalization_contract_sha256: 98420a10fbbdd5f90e7479b58c83dbe3f157187c8e3238934843add383771244
+
+scenario_snapshot:
+  provenance:
+    path: ../../scenarios/highway_merge/v1/PROVENANCE.json
+    sha256: 2f63427eb81be59878921edd0ec84eb422efe4e0276ae77d2278ea0aa0a46878
+  geometry_check:
+    path: ../../scenarios/highway_merge/v1/scenario_geometry_check.json
+    sha256: e768a43c830abebb96ab190419b5cc08927f77134db5896a02d25668306d46ca
+  assets:
+    - role: sumocfg
+      path: ../../scenarios/highway_merge/v1/highway_merge.sumocfg
+      sha256: 5ca47390e28966e617ab3c9af8738fbf303b9abeed61013de890e36827b55aa7
+    - role: net
+      path: ../../scenarios/highway_merge/v1/highway_merge.net.xml
+      sha256: bcb5a62c9875e72f98c03de4c0e9dc7bc568df0d1649e5a9c29abe7b149888f9
+    - role: route
+      path: ../../scenarios/highway_merge/v1/highway_merge.rou.xml
+      sha256: bdfb7cd98dead51bdcc175a604aa1753b2718c063d4454e686acfa294d1b2572
+
+action_ontology:
+  name: sumo_highway_merge_3x3
+  version: p4-action-factors-v1
+  labels:
+    - right_decelerate
+    - right_hold
+    - right_accelerate
+    - keep_decelerate
+    - keep_hold
+    - keep_accelerate
+    - left_decelerate
+    - left_hold
+    - left_accelerate
+  ontology_sha256: b3dddbce9c47b0160cb8741367e06cf069c63b25ca5eae340470261a331ce222
+  availability_contract_sha256: 5f7a1d5cb30a7be45c0ec5e45aeba629a93aec67a6cd4bb773aed7d51d065e26
+
+semantic_projector:
+  name: sumo_merge_core_v1_semantic
+  path: ../semantics/sumo_merge_v1.yaml
+  file_sha256: ebbe5d0e540e1272c15ab5bb65994308f72b3b18b520877ae8e1188a0b88bd17
+  contract_sha256: 1e513a4c23970e7c4127726f5a2e30c4fe8e47161b10625011ef8b62b2bd020c
+  guarantee: policy_input_schema_only_not_physical_realizability
+
+safety_contract:
+  path: ../safety/sumo_merge_cost_v1.yaml
+  file_sha256: e3c0961fefd01e7952a06fd92916940861d177346a1ff34088227573cc4f6c4e
+  cost_definition_sha256: e3c0961fefd01e7952a06fd92916940861d177346a1ff34088227573cc4f6c4e
+  metric_version: oriented_box_v1
+  missing_or_version_mismatched_signal: invalid
+
+method:
+  name: rapid_guard
+  config: ../defenses/rapid_guard.yaml
+  victim: frozen_sb3_categorical_ppo
+  detector:
+    channels:
+      - temporal_innovation
+      - categorical_js
+      - ibp_margin_deficit
+    threshold_split: validation_clean_episode_max
+    threshold_may_use_test: false
+    attack_exposed_fit_requires_p3_and_p4: true
+  purifier:
+    fit_split: train_only
+    output_projection_required: true
+    unseen_attack_test_required: true
+    physical_realizability_certified: false
+  certificate:
+    horizon: one_step
+    scope: clean_greedy_action_invariance_only
+    unsupported_actor_result: unavailable
+    certifies_return_or_closed_loop_safety: false
+  anchor:
+    score_before_update: true
+    reset_each_episode: true
+    suspicious_or_fallback_update_allowed: false
+    history_bootstrap_mode: strict_calibrated_v1
+    bootstrap_source: caller_attested_attack_free_trusted_prefix
+    prior_trusted_frames: 2
+    consecutive_steps_required: true
+    repeated_first_bootstrap_allowed: false
+    uncalibrated_warmup_behavior: fail_closed_before_policy_or_ibp
+    fallback_history_behavior: invalidate_until_explicit_rebootstrap
+  fallback:
+    preferred_action_indices: [4]
+    preferred_action_labels: [keep_hold]
+    legal_action_required: true
+    no_oracle_or_future_information: true
+    safety_certified: false
+
+formal_evaluation:
+  split_roles:
+    detector_and_purifier_fit: train
+    clean_threshold_calibration: validation
+    adaptive_attacker_training: attacker_train
+    hypotheses_and_final_metrics: test
+    cohorts_must_be_disjoint: true
+    temporal_windows_may_cross_episode_or_scenario: false
+  required_cells:
+    - {attack: Clean, adaptivity: clean}
+    - {attack: FGSM, adaptivity: non_adaptive}
+    - {attack: FGSM, adaptivity: defense_aware}
+    - {attack: PGD, adaptivity: non_adaptive}
+    - {attack: PGD, adaptivity: defense_aware}
+    - {attack: MAD, adaptivity: non_adaptive}
+    - {attack: MAD, adaptivity: defense_aware}
+    - {attack: Robust-Sarsa, adaptivity: non_adaptive}
+    - {attack: Robust-Sarsa, adaptivity: defense_aware}
+    - {attack: PA-AD, adaptivity: non_adaptive}
+    - {attack: PA-AD, adaptivity: defense_aware}
+    - {attack: STFA, adaptivity: non_adaptive}
+    - {attack: STFA, adaptivity: defense_aware}
+  missing_or_failed_cell_invalidates_robust_summary: true
+  worst_case_endpoints_are_independent:
+    - minimum_episode_return
+    - maximum_collision_count
+    - maximum_near_miss_count
+    - maximum_safety_cost
+  accounting:
+    components_are_non_fungible: true
+    unified_total_query_budget: false
+    components:
+      - environment_steps
+      - victim_policy_calls
+      - detector_calls
+      - detector_policy_calls
+      - proposal_calls
+      - semantic_projection_calls
+      - purification_attempts
+      - purifier_calls
+      - certificate_calls
+      - certificate_policy_calls
+      - ibp_bound_calls
+      - safety_critic_calls
+      - fallback_calls
+      - shield_calls
+      - defense_transform_calls
+      - attacker_victim_forward_queries
+      - attacker_victim_backward_queries
+      - attacker_defense_forward_queries
+      - attacker_defense_backward_queries
+      - attacker_eot_samples
+      - attacker_bpda_surrogate_calls
+      - attacker_simulator_calls
+
+unresolved_external_inputs:
+  rows:
+    path: ../../outputs/p5_inputs/REPLACE_SUMO_EPISODES.jsonl
+    sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+  producer_manifest:
+    path: ../../outputs/p5_inputs/REPLACE_SUMO_PRODUCER.manifest.json
+    sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+  victim_bundle:
+    path: ../../outputs/p5_inputs/REPLACE_SUMO_VICTIM.zip
+    sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+  rapid_guard_bundle:
+    path: ../../outputs/p5_inputs/REPLACE_SUMO_RAPID_GUARD.pt
+    sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+  adaptive_attacker_manifests:
+    FGSM: "0000000000000000000000000000000000000000000000000000000000000000"
+    PGD: "0000000000000000000000000000000000000000000000000000000000000000"
+    MAD: "0000000000000000000000000000000000000000000000000000000000000000"
+    Robust-Sarsa: "0000000000000000000000000000000000000000000000000000000000000000"
+    PA-AD: "0000000000000000000000000000000000000000000000000000000000000000"
+    STFA: "0000000000000000000000000000000000000000000000000000000000000000"
+
+evidence_scope:
+  algorithm_contract: true
+  sb3_integration: true
+  public_driving_contract: false
+  public_driving_empirical_effectiveness: false
+  sumo_contract: false
+  sumo_empirical_effectiveness: false
+  sumo_empirical_effectiveness_reason: stable_immutable_sumo_ppo_victim_and_formal_rows_unavailable
+  empirical_robustness_result: false

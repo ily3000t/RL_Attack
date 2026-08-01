@@ -39,6 +39,8 @@ rl-attack-strong-audit = "rl_attack.cli.strong_attack_audit:main"
 rl-attack-train-strong = "rl_attack.cli.reproduced_attack_training:main"
 rl-attack-p4-audit = "rl_attack.cli.p4_audit:main"
 rl-attack-train-stfa = "rl_attack.cli.stfa_training:main"
+rl-attack-p5-audit = "rl_attack.cli.p5_audit:main"
+rl-attack-train-rapid-guard = "rl_attack.cli.rapid_guard_training:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
