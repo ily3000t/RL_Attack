@@ -615,7 +615,7 @@ class PAADPolicyDirectionAttack(ObservationAttack):
             "valid_direction_fraction": float(
                 valid_directions.float().mean().item()
             ),
-            "zero_fallback_fraction": float(
+            "clean_candidate_fraction": float(
                 (best_restart < 0).float().mean().item()
             ),
             "cost_unit": "victim_policy_forward_and_input_gradient_per_batch",
@@ -626,7 +626,11 @@ class PAADPolicyDirectionAttack(ObservationAttack):
             "evaluation_status": "valid",
         }
         if torch.all(best_restart < 0):
-            metadata["fallback"] = "no_improving_candidate"
+            metadata["solver_outcome"] = "clean_candidate_selected"
+        elif torch.any(best_restart < 0):
+            metadata["solver_outcome"] = "mixed_clean_and_perturbed_candidates"
+        else:
+            metadata["solver_outcome"] = "perturbed_candidate_selected"
         return self.finish(
             clean,
             best_adversarial,

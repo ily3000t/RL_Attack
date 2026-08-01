@@ -20,7 +20,16 @@ def _parser() -> argparse.ArgumentParser:
         default=Path("outputs") / "p3_reproduced_attacks",
     )
     parser.add_argument("--device", default="cpu")
-    parser.add_argument("--overwrite", action="store_true")
+    output_mode = parser.add_mutually_exclusive_group()
+    output_mode.add_argument("--overwrite", action="store_true")
+    output_mode.add_argument(
+        "--resume",
+        action="store_true",
+        help=(
+            "resume from complete, fingerprint-matched victim × attack × "
+            "epsilon-ratio shards"
+        ),
+    )
     return parser
 
 
@@ -32,6 +41,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             output_directory=args.output_dir,
             device=args.device,
             overwrite=args.overwrite,
+            resume=args.resume,
         )
     except InvalidAttackEvaluation as error:
         invalid_manifest = args.output_dir / "manifest.json"

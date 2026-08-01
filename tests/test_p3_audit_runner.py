@@ -4,6 +4,7 @@ import csv
 import dataclasses
 import hashlib
 import json
+import shutil
 from pathlib import Path
 
 import gymnasium as gym
@@ -21,14 +22,14 @@ from rl_attack.attacks.observation.base import (
     PerturbationBounds,
 )
 from rl_attack.experiments.p3_audit import (
-    AttackBuildContext,
+    SEED_DERIVATION,
     AttackAccountingError,
     AttackBudgetExceeded,
+    AttackBuildContext,
     AttackSpec,
     BudgetSpec,
-    InvalidAttackEvaluation,
     InstrumentedCategoricalPolicy,
-    SEED_DERIVATION,
+    InvalidAttackEvaluation,
     SuccessRule,
     VictimSpec,
     build_categorical_mad_pgd_attack,
@@ -188,6 +189,46 @@ def _cartpole_model() -> PPO:
         )
     finally:
         env.close()
+
+
+class _ResumeHarness:
+    def __init__(self) -> None:
+        self.model = _cartpole_model()
+        self.factory_contexts: list[AttackBuildContext] = []
+
+    def reset_model(self) -> None:
+        self.model = _cartpole_model()
+
+    def victim_loader(self, spec, path, device):
+        del spec, path, device
+        return self.model
+
+    def environment_factory(self):
+        return gym.make("CartPole-v1", max_episode_steps=3)
+
+    def attack_factory(self, context):
+        self.factory_contexts.append(context)
+        return _DummyAttack(context.bounds, name=context.attack.name)
+
+
+def _run_resume_harness(
+    config_path: Path,
+    output: Path,
+    harness: _ResumeHarness,
+    *,
+    resume: bool = False,
+):
+    return run_p3_audit(
+        config_path,
+        output_directory=output,
+        resume=resume,
+        victim_loader=harness.victim_loader,
+        environment_factory=harness.environment_factory,
+        attack_factories={
+            "dummy_a": harness.attack_factory,
+            "dummy_b": harness.attack_factory,
+        },
+    )
 
 
 def _one_dimensional_build_context(
@@ -469,10 +510,17 @@ def test_cartpole_full_matrix_writes_paired_json_csv_and_provenance(
         "worst_over_attacks.json",
         "worst_over_attacks.csv",
         "manifest.json",
+        ".p3_shards",
     }
     assert expected_files == {path.name for path in output.iterdir()}
+    shard_files = {path.name for path in (output / ".p3_shards").iterdir()}
+    assert "run.json" in shard_files
+    assert len(shard_files) == 5  # run anchor + four complete matrix shards
     for path in output.glob("*.json"):
-        json.loads(path.read_text(encoding="utf-8"), parse_constant=lambda value: pytest.fail(value))
+        json.loads(
+            path.read_text(encoding="utf-8"),
+            parse_constant=lambda value: pytest.fail(value),
+        )
 
     episodes = json.loads((output / "episodes.json").read_text(encoding="utf-8"))
     assert len(episodes["clean"]) == 2
@@ -532,6 +580,185 @@ def test_cartpole_full_matrix_writes_paired_json_csv_and_provenance(
         assert len(list(csv.DictReader(stream))) == 8
     assert manifest["artifacts"]["episodes.csv"]["sha256"]
     assert manifest["provenance"]["repository"]["git_commit"]
+    assert manifest["resume"]["expected_shards"] == 4
+    assert manifest["resume"]["computed_shards"] == 4
+    assert manifest["resume"]["reused_shards"] == 0
+
+
+def test_resume_skips_only_complete_shards_and_matches_uninterrupted_results(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path, _ = _write_config(tmp_path)
+    harness = _ResumeHarness()
+    uninterrupted = tmp_path / "uninterrupted"
+    uninterrupted_manifest = _run_resume_harness(
+        config_path,
+        uninterrupted,
+        harness,
+    )
+
+    interrupted = tmp_path / "interrupted"
+    harness.reset_model()
+    harness.factory_contexts.clear()
+    original_writer = p3_audit_module._write_episode_shard
+    complete_writes = 0
+
+    def interrupt_after_first_complete_shard(path, **kwargs):
+        nonlocal complete_writes
+        if complete_writes == 1:
+            raise RuntimeError("simulated audit interruption")
+        original_writer(path, **kwargs)
+        complete_writes += 1
+
+    monkeypatch.setattr(
+        p3_audit_module,
+        "_write_episode_shard",
+        interrupt_after_first_complete_shard,
+    )
+    with pytest.raises(RuntimeError, match="simulated audit interruption"):
+        _run_resume_harness(config_path, interrupted, harness)
+    assert complete_writes == 1
+    assert not (interrupted / "manifest.json").exists()
+    assert len(list((interrupted / ".p3_shards").glob("shard-*.json"))) == 1
+
+    monkeypatch.setattr(p3_audit_module, "_write_episode_shard", original_writer)
+    harness.reset_model()
+    harness.factory_contexts.clear()
+    resumed_manifest = _run_resume_harness(
+        config_path,
+        interrupted,
+        harness,
+        resume=True,
+    )
+
+    assert len(harness.factory_contexts) == 3
+    assert resumed_manifest["resume"]["reused_shards"] == 1
+    assert resumed_manifest["resume"]["computed_shards"] == 3
+    assert resumed_manifest["summaries"] == uninterrupted_manifest["summaries"]
+    assert resumed_manifest["worst_over_attacks"] == uninterrupted_manifest[
+        "worst_over_attacks"
+    ]
+    for name in (
+        "resolved_config.json",
+        "episodes.json",
+        "episodes.csv",
+        "summaries.json",
+        "summaries.csv",
+        "worst_over_attacks.json",
+        "worst_over_attacks.csv",
+    ):
+        assert (interrupted / name).read_bytes() == (uninterrupted / name).read_bytes()
+    uninterrupted_shards = uninterrupted / ".p3_shards"
+    resumed_shards = interrupted / ".p3_shards"
+    assert {path.name for path in uninterrupted_shards.iterdir()} == {
+        path.name for path in resumed_shards.iterdir()
+    }
+    for source in uninterrupted_shards.iterdir():
+        assert (resumed_shards / source.name).read_bytes() == source.read_bytes()
+
+
+def test_resume_fails_closed_for_unknown_corrupt_incomplete_or_changed_inputs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path, checkpoint = _write_config(tmp_path)
+    harness = _ResumeHarness()
+    seed_output = tmp_path / "seed_interrupted"
+    original_writer = p3_audit_module._write_episode_shard
+    complete_writes = 0
+
+    def interrupt_after_first_complete_shard(path, **kwargs):
+        nonlocal complete_writes
+        if complete_writes == 1:
+            raise RuntimeError("simulated audit interruption")
+        original_writer(path, **kwargs)
+        complete_writes += 1
+
+    monkeypatch.setattr(
+        p3_audit_module,
+        "_write_episode_shard",
+        interrupt_after_first_complete_shard,
+    )
+    with pytest.raises(RuntimeError, match="simulated audit interruption"):
+        _run_resume_harness(config_path, seed_output, harness)
+    monkeypatch.setattr(p3_audit_module, "_write_episode_shard", original_writer)
+
+    unknown_output = tmp_path / "unknown"
+    shutil.copytree(seed_output, unknown_output)
+    (unknown_output / ".p3_shards" / "unknown.json").write_text(
+        "{}", encoding="utf-8"
+    )
+    harness.reset_model()
+    with pytest.raises(ValueError, match="unknown or stale"):
+        _run_resume_harness(config_path, unknown_output, harness, resume=True)
+
+    corrupt_output = tmp_path / "corrupt"
+    shutil.copytree(seed_output, corrupt_output)
+    corrupt_shard = next((corrupt_output / ".p3_shards").glob("shard-*.json"))
+    corrupt_payload = json.loads(corrupt_shard.read_text(encoding="utf-8"))
+    corrupt_payload["episodes"][0]["episode_return"] += 1.0
+    corrupt_shard.write_text(
+        json.dumps(corrupt_payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    harness.reset_model()
+    with pytest.raises(ValueError, match="record hash mismatch"):
+        _run_resume_harness(config_path, corrupt_output, harness, resume=True)
+
+    incomplete_output = tmp_path / "incomplete"
+    shutil.copytree(seed_output, incomplete_output)
+    incomplete_shard = next(
+        (incomplete_output / ".p3_shards").glob("shard-*.json")
+    )
+    incomplete_payload = json.loads(incomplete_shard.read_text(encoding="utf-8"))
+    incomplete_payload["episodes"].pop()
+    incomplete_payload["record_count"] = len(incomplete_payload["episodes"])
+    incomplete_payload["records_sha256"] = (
+        p3_audit_module._canonical_json_sha256(incomplete_payload["episodes"])
+    )
+    incomplete_shard.write_text(
+        json.dumps(incomplete_payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    harness.reset_model()
+    with pytest.raises(ValueError, match="incomplete"):
+        _run_resume_harness(config_path, incomplete_output, harness, resume=True)
+
+    changed_config_output = tmp_path / "changed_config"
+    shutil.copytree(seed_output, changed_config_output)
+    original_config = config_path.read_text(encoding="utf-8")
+    changed = yaml.safe_load(original_config)
+    changed["statistics"]["bootstrap_resamples"] += 1
+    config_path.write_text(yaml.safe_dump(changed, sort_keys=False), encoding="utf-8")
+    harness.reset_model()
+    with pytest.raises(ValueError, match="fingerprint or input hashes"):
+        _run_resume_harness(config_path, changed_config_output, harness, resume=True)
+    config_path.write_text(original_config, encoding="utf-8")
+
+    changed_checkpoint_output = tmp_path / "changed_checkpoint"
+    shutil.copytree(seed_output, changed_checkpoint_output)
+    original_checkpoint = checkpoint.read_bytes()
+    checkpoint.write_bytes(original_checkpoint + b"changed")
+    harness.reset_model()
+    with pytest.raises(ValueError, match="fingerprint or input hashes"):
+        _run_resume_harness(
+            config_path,
+            changed_checkpoint_output,
+            harness,
+            resume=True,
+        )
+    checkpoint.write_bytes(original_checkpoint)
+
+
+def test_strong_attack_audit_cli_exposes_mutually_exclusive_resume() -> None:
+    from rl_attack.cli.strong_attack_audit import _parser
+
+    args = _parser().parse_args(["audit.yaml", "--resume"])
+    assert args.resume is True
+    assert args.overwrite is False
+    with pytest.raises(SystemExit):
+        _parser().parse_args(["audit.yaml", "--resume", "--overwrite"])
 
 
 @pytest.mark.parametrize("mismatch", ["observation", "action"])
@@ -718,8 +945,8 @@ def _prepare_real_p3_bundles(tmp_path: Path) -> dict[str, object]:
     from rl_attack.training.robust_sarsa import (
         RobustSarsaTrainConfig,
         SarsaTransitionBatch,
-        sb3_policy_fingerprints,
         save_robust_sarsa_checkpoint,
+        sb3_policy_fingerprints,
         train_robust_sarsa_critic,
     )
 

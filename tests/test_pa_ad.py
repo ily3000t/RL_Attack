@@ -156,6 +156,33 @@ def test_pa_ad_actor_accepts_unbounded_box_limits() -> None:
     assert np.max(np.abs(result.perturbation)) <= 0.1 + 1.0e-6
 
 
+def test_pa_ad_clean_candidate_is_a_valid_solver_outcome() -> None:
+    class CleanWinsAttack(PAADPolicyDirectionAttack):
+        @staticmethod
+        def _objective(probabilities, clean_probabilities, directions, valid_directions):
+            shift = probabilities - clean_probabilities
+            distance = torch.linalg.vector_norm(shift, ord=2, dim=-1)
+            objective = -distance
+            return objective, torch.zeros_like(objective)
+
+    clean = np.asarray([0.4, -0.2, 0.1], dtype=np.float32)
+    result = CleanWinsAttack(
+        _bounds(),
+        StaticPolicyDirectionDirector([-1.0, 1.0, 0.0]),
+        observation_shape=(3,),
+        steps=2,
+        restarts=2,
+        random_start=True,
+        seed=23,
+    ).generate(clean, CountingPolicy())
+
+    np.testing.assert_array_equal(result.adversarial_observation, clean)
+    assert result.metadata["evaluation_status"] == "valid"
+    assert result.metadata["solver_outcome"] == "clean_candidate_selected"
+    assert result.metadata["clean_candidate_fraction"] == pytest.approx(1.0)
+    assert "fallback" not in result.metadata
+
+
 def test_degenerate_direction_and_empty_box_return_zero_perturbation() -> None:
     clean = np.asarray([0.2, 0.0, -0.1], dtype=np.float32)
     zero_director = StaticPolicyDirectionDirector([1.0, 1.0, 1.0])

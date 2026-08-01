@@ -6,9 +6,13 @@ import hashlib
 import importlib
 import importlib.metadata
 import json
+import marshal
 import math
+import os
 import platform
+import shutil
 import subprocess
+import tempfile
 from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -30,9 +34,12 @@ from rl_attack.attacks.observation.base import (
 from rl_attack.core.policy import CategoricalPolicy
 from rl_attack.policies.sb3 import SB3CategoricalPolicyAdapter
 
-
 SCHEMA_VERSION = "p3_reproduced_attack_audit_v1"
 SEED_DERIVATION = "sha256_u63_canonical_json_v1"
+SHARD_SCHEMA_VERSION = "rl_attack.p3_attack_episode_shard.v1"
+SHARD_RUN_SCHEMA_VERSION = "rl_attack.p3_shard_run.v1"
+SHARD_DIRECTORY_NAME = ".p3_shards"
+AGGREGATE_STAGING_NAME = ".p3_aggregate_staging"
 REQUIRED_METRICS = frozenset(
     {
         "episode_return",
@@ -2457,6 +2464,72 @@ def _write_json(path: Path, value: Any) -> None:
     )
 
 
+def _canonical_json_bytes(value: Any) -> bytes:
+    return json.dumps(
+        _jsonable(value),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+def _canonical_json_sha256(value: Any) -> str:
+    return hashlib.sha256(_canonical_json_bytes(value)).hexdigest()
+
+
+def _strict_json_load(path: Path, *, location: str) -> Any:
+    def reject_constant(value: str) -> None:
+        raise ValueError(f"{location} contains non-standard JSON constant {value!r}")
+
+    def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"{location} contains duplicate JSON key {key!r}")
+            result[key] = value
+        return result
+
+    try:
+        return json.loads(
+            path.read_text(encoding="utf-8"),
+            parse_constant=reject_constant,
+            object_pairs_hook=reject_duplicate_keys,
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise ValueError(f"cannot read strict {location}: {path}") from error
+
+
+def _atomic_write_json(path: Path, value: Any) -> None:
+    """Write one strict JSON artifact and publish it with an atomic rename."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
+            json.dump(
+                _jsonable(value),
+                stream,
+                indent=2,
+                sort_keys=True,
+                ensure_ascii=False,
+                allow_nan=False,
+            )
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    except Exception:
+        if temporary.exists():
+            temporary.unlink()
+        raise
+
+
 def _write_csv(path: Path, records: Sequence[Mapping[str, Any]]) -> None:
     rows = [_flatten_record(record) for record in records]
     fieldnames = sorted({key for row in rows for key in row})
@@ -2581,12 +2654,571 @@ def _attack_resource_provenance(config: P3AuditConfig) -> dict[str, list[dict[st
     return resources
 
 
+_FINAL_ARTIFACT_NAMES = (
+    "resolved_config.json",
+    "episodes.json",
+    "episodes.csv",
+    "summaries.json",
+    "summaries.csv",
+    "worst_over_attacks.json",
+    "worst_over_attacks.csv",
+    "manifest.json",
+)
+
+_ATTACKED_EPISODE_KEYS = {
+    "victim",
+    "victim_checkpoint_sha256",
+    "epsilon_ratio",
+    "attack",
+    "episode_seed",
+    "opportunity_seed",
+    "attack_seed",
+    "victim_action_seed",
+    "victim_action_mode",
+    "episode_return",
+    "episode_length",
+    "terminated",
+    "truncated",
+    "attack_count",
+    "action_flip_count",
+    "attack_specific_success_count",
+    "policy_queries",
+    "gradient_evaluations",
+    "perturbation_linf_mean",
+    "perturbation_linf_max",
+    "perturbation_l2_mean",
+    "safety",
+    "paired_clean_return",
+    "paired_clean_length",
+    "paired_return_drop",
+    "paired_clean_safety",
+}
+
+
+def _implementation_tree_contract() -> dict[str, Any]:
+    root = Path(__file__).resolve().parents[3]
+    candidates = [root / "pyproject.toml"]
+    candidates.extend(sorted((root / "src" / "rl_attack").rglob("*.py")))
+    files = []
+    for path in candidates:
+        if not path.is_file():
+            raise FileNotFoundError(f"implementation fingerprint input is missing: {path}")
+        files.append(
+            {
+                "path": path.relative_to(root).as_posix(),
+                "sha256": sha256_file(path),
+            }
+        )
+    return {
+        "algorithm": "sorted_relative_path_and_file_sha256_v1",
+        "files": files,
+        "sha256": _canonical_json_sha256(files),
+    }
+
+
+def _callable_contract(value: Any, *, default_name: str) -> dict[str, Any]:
+    if value is None:
+        return {"kind": "built_in_default", "name": default_name}
+    target = value
+    code = getattr(target, "__code__", None)
+    if code is None and callable(value):
+        target = value.__call__
+        code = getattr(target, "__code__", None)
+    if code is None:
+        raise TypeError(
+            "resumable P3 audits require injected callables with inspectable Python code"
+        )
+    return {
+        "kind": "injected_python_callable",
+        "module": str(getattr(value, "__module__", type(value).__module__)),
+        "qualname": str(
+            getattr(value, "__qualname__", type(value).__qualname__)
+        ),
+        "code_sha256": hashlib.sha256(marshal.dumps(code)).hexdigest(),
+    }
+
+
+def _run_input_contract(
+    *,
+    config: P3AuditConfig,
+    device: str,
+    environment_contract: Mapping[str, Any],
+    victim_checkpoint_hashes: Mapping[str, str],
+    attack_resources: Mapping[str, Sequence[Mapping[str, Any]]],
+    provenance: Mapping[str, Any],
+    victim_loader: VictimLoader | None,
+    environment_factory: EnvironmentFactory | None,
+    attack_factories: Mapping[str, AttackFactory] | None,
+) -> dict[str, Any]:
+    configured_victims = []
+    for victim in config.victims:
+        configured_victims.append(
+            {
+                "name": victim.name,
+                "algorithm": victim.algorithm,
+                "checkpoint": str(victim.checkpoint),
+                "checkpoint_sha256": victim_checkpoint_hashes[victim.name],
+            }
+        )
+    factory_overrides = {
+        name: _callable_contract(factory, default_name="unused")
+        for name, factory in sorted((attack_factories or {}).items())
+    }
+    return {
+        "schema_version": "rl_attack.p3_resume_inputs.v1",
+        "source_config": {
+            "path": str(config.config_path),
+            "sha256": config.config_sha256,
+            "resolved_sha256": _canonical_json_sha256(config.to_dict()),
+        },
+        "environment": _jsonable(environment_contract),
+        "victims": configured_victims,
+        "attack_resources": _jsonable(attack_resources),
+        "implementation": _implementation_tree_contract(),
+        "repository": {
+            "git_commit": provenance["repository"]["git_commit"],
+            "locks": provenance["locks"],
+        },
+        "runtime": {
+            **provenance["runtime"],
+            "requested_device": device,
+            "torch_cuda_build": torch.version.cuda,
+        },
+        "execution_adapters": {
+            "victim_loader": _callable_contract(
+                victim_loader,
+                default_name="stable_baselines3.PPO.load",
+            ),
+            "environment_factory": _callable_contract(
+                environment_factory,
+                default_name="configured_gymnasium_environment",
+            ),
+            "attack_factory_overrides": factory_overrides,
+        },
+    }
+
+
+def _shard_identity(
+    *,
+    run_fingerprint: str,
+    victim: VictimSpec,
+    victim_checkpoint_sha256: str,
+    attack: AttackSpec,
+    epsilon_ratio: float,
+) -> dict[str, Any]:
+    return {
+        "run_fingerprint_sha256": run_fingerprint,
+        "victim": victim.name,
+        "victim_checkpoint_sha256": victim_checkpoint_sha256,
+        "attack": attack.name,
+        "epsilon_ratio": float(epsilon_ratio),
+        "epsilon_ratio_token": _ratio_token(epsilon_ratio),
+    }
+
+
+def _expected_shards(
+    config: P3AuditConfig,
+    *,
+    run_fingerprint: str,
+    victim_checkpoint_hashes: Mapping[str, str],
+) -> list[dict[str, Any]]:
+    expected = []
+    filenames: set[str] = set()
+    for victim in config.victims:
+        for ratio in config.epsilon.ratios:
+            for attack in config.attacks:
+                identity = _shard_identity(
+                    run_fingerprint=run_fingerprint,
+                    victim=victim,
+                    victim_checkpoint_sha256=victim_checkpoint_hashes[victim.name],
+                    attack=attack,
+                    epsilon_ratio=ratio,
+                )
+                key = _canonical_json_sha256(identity)
+                filename = f"shard-{key}.json"
+                if filename in filenames:
+                    raise RuntimeError("P3 shard identities are not unique")
+                filenames.add(filename)
+                expected.append(
+                    {
+                        "filename": filename,
+                        "shard_key_sha256": key,
+                        "identity": identity,
+                    }
+                )
+    return expected
+
+
+def _validate_output_entry_types(output: Path, names: set[str]) -> None:
+    for name in names:
+        path = output / name
+        if path.is_symlink():
+            raise ValueError(f"P3 resume refuses symbolic-link output entry: {path}")
+        if name in {SHARD_DIRECTORY_NAME, AGGREGATE_STAGING_NAME}:
+            if not path.is_dir():
+                raise ValueError(f"P3 resume expected a directory: {path}")
+        elif not path.is_file():
+            raise ValueError(f"P3 resume expected a regular file: {path}")
+
+
+def _prepare_shard_store(
+    output: Path,
+    *,
+    resume: bool,
+    overwrite: bool,
+    run_inputs: Mapping[str, Any],
+    run_fingerprint: str,
+    expected_shards: Sequence[Mapping[str, Any]],
+) -> Path:
+    if resume and overwrite:
+        raise ValueError("resume and overwrite are mutually exclusive")
+    allowed_root = set(_FINAL_ARTIFACT_NAMES) | {
+        SHARD_DIRECTORY_NAME,
+        AGGREGATE_STAGING_NAME,
+    }
+    existing_names = {path.name for path in output.iterdir()} if output.exists() else set()
+    if existing_names and not resume and not overwrite:
+        raise FileExistsError(
+            f"audit output directory is not empty: {output}; pass overwrite=True "
+            "or resume=True"
+        )
+    unknown_root = existing_names - allowed_root
+    if unknown_root and (resume or overwrite):
+        raise ValueError(
+            "P3 output contains unknown entries and cannot be safely reused: "
+            f"{sorted(unknown_root)}"
+        )
+    if existing_names and (resume or overwrite):
+        _validate_output_entry_types(output, existing_names)
+
+    if overwrite:
+        for name in _FINAL_ARTIFACT_NAMES:
+            path = output / name
+            if path.is_file():
+                path.unlink()
+        for name in (SHARD_DIRECTORY_NAME, AGGREGATE_STAGING_NAME):
+            path = output / name
+            if path.is_dir():
+                shutil.rmtree(path)
+        existing_names = set()
+
+    output.mkdir(parents=True, exist_ok=True)
+    staging = output / AGGREGATE_STAGING_NAME
+    if resume and staging.is_dir():
+        # Staging is never an evidence source. Complete shards remain authoritative.
+        shutil.rmtree(staging)
+
+    shard_directory = output / SHARD_DIRECTORY_NAME
+    anchor = {
+        "schema_version": SHARD_RUN_SCHEMA_VERSION,
+        "status": "initialized",
+        "run_fingerprint_sha256": run_fingerprint,
+        "run_inputs_sha256": _canonical_json_sha256(run_inputs),
+        "run_inputs": _jsonable(run_inputs),
+        "expected_shards": _jsonable(expected_shards),
+    }
+    anchor_path = shard_directory / "run.json"
+    if shard_directory.exists():
+        if not resume:
+            raise FileExistsError(f"P3 shard directory already exists: {shard_directory}")
+        if shard_directory.is_symlink() or not shard_directory.is_dir():
+            raise ValueError("P3 shard store must be a real directory")
+        if not anchor_path.is_file() or anchor_path.is_symlink():
+            raise ValueError("P3 resume shard store is missing its trusted run.json")
+        observed_anchor = _strict_json_load(anchor_path, location="P3 shard run anchor")
+        if observed_anchor != anchor:
+            raise ValueError("P3 shard run fingerprint or input hashes do not match")
+    else:
+        if resume and existing_names:
+            raise ValueError(
+                "P3 resume cannot reuse legacy output without a shard run anchor"
+            )
+        shard_directory.mkdir(parents=False, exist_ok=False)
+        _atomic_write_json(anchor_path, anchor)
+
+    expected_names = {"run.json"} | {
+        str(item["filename"]) for item in expected_shards
+    }
+    observed_names = {path.name for path in shard_directory.iterdir()}
+    unexpected = observed_names - expected_names
+    if unexpected:
+        raise ValueError(
+            "P3 shard store contains unknown or stale entries: "
+            f"{sorted(unexpected)}"
+        )
+    for path in shard_directory.iterdir():
+        if path.is_symlink() or not path.is_file():
+            raise ValueError(f"P3 shard store contains a non-regular entry: {path}")
+    return shard_directory
+
+
+def _validate_resumed_episode(
+    row: Mapping[str, Any],
+    *,
+    config: P3AuditConfig,
+    identity: Mapping[str, Any],
+    clean: Mapping[str, Any],
+    effective_epsilon: np.ndarray,
+) -> None:
+    _strict_keys(
+        row,
+        allowed=set(_ATTACKED_EPISODE_KEYS),
+        required=set(_ATTACKED_EPISODE_KEYS),
+        location="P3 resumed attacked episode",
+    )
+    episode_seed = _non_negative_int(row["episode_seed"], "shard episode_seed")
+    if (
+        row["victim"] != identity["victim"]
+        or row["victim_checkpoint_sha256"]
+        != identity["victim_checkpoint_sha256"]
+        or row["attack"] != identity["attack"]
+        or _ratio_token(_finite_float(row["epsilon_ratio"], "shard epsilon_ratio"))
+        != identity["epsilon_ratio_token"]
+        or row["victim_action_mode"] != config.victim_action_mode
+    ):
+        raise ValueError("P3 resumed episode identity does not match its shard")
+    expected_opportunity = derive_seed(
+        config.attack_base_seed,
+        "attack_opportunities",
+        identity["victim_checkpoint_sha256"],
+        episode_seed,
+        identity["epsilon_ratio_token"],
+    )
+    expected_attack = derive_seed(
+        config.attack_base_seed,
+        "attack_solver",
+        identity["victim_checkpoint_sha256"],
+        episode_seed,
+        identity["epsilon_ratio_token"],
+        identity["attack"],
+    )
+    expected_victim_action = _victim_action_seed(
+        config,
+        identity["victim_checkpoint_sha256"],
+        episode_seed,
+    )
+    if (
+        row["opportunity_seed"] != expected_opportunity
+        or row["attack_seed"] != expected_attack
+        or row["victim_action_seed"] != expected_victim_action
+    ):
+        raise ValueError("P3 resumed episode seed derivation does not match")
+    if (
+        row["paired_clean_return"] != clean["episode_return"]
+        or row["paired_clean_length"] != clean["episode_length"]
+        or row["paired_clean_safety"] != clean["safety"]
+    ):
+        raise ValueError("P3 resumed shard no longer matches the clean paired cohort")
+    episode_return = _finite_float(row["episode_return"], "shard episode_return")
+    paired_drop = _finite_float(row["paired_return_drop"], "shard paired_return_drop")
+    if paired_drop != float(clean["episode_return"]) - episode_return:
+        raise ValueError("P3 resumed paired return drop is inconsistent")
+    episode_length = _positive_int(row["episode_length"], "shard episode_length")
+    for key in (
+        "attack_count",
+        "action_flip_count",
+        "attack_specific_success_count",
+        "policy_queries",
+        "gradient_evaluations",
+    ):
+        _non_negative_int(row[key], f"shard {key}")
+    if row["attack_count"] > episode_length:
+        raise ValueError("P3 resumed attack_count exceeds episode length")
+    if row["action_flip_count"] > row["attack_count"]:
+        raise ValueError("P3 resumed action flips exceed attacked steps")
+    if row["attack_specific_success_count"] > row["attack_count"]:
+        raise ValueError("P3 resumed successes exceed attacked steps")
+    if row["policy_queries"] > (
+        row["attack_count"] * config.budget.max_policy_queries_per_attacked_step
+    ):
+        raise ValueError("P3 resumed policy-query count exceeds its hard budget")
+    if row["gradient_evaluations"] > (
+        row["attack_count"] * config.budget.max_gradient_evaluations_per_attacked_step
+    ):
+        raise ValueError("P3 resumed gradient count exceeds its hard budget")
+    for key in (
+        "perturbation_linf_mean",
+        "perturbation_linf_max",
+        "perturbation_l2_mean",
+    ):
+        value = _finite_float(row[key], f"shard {key}")
+        if value < 0:
+            raise ValueError(f"P3 resumed {key} must be non-negative")
+    if float(row["perturbation_linf_max"]) > float(np.max(effective_epsilon)) + 2e-6:
+        raise ValueError("P3 resumed perturbation exceeds the configured epsilon")
+    for key in ("terminated", "truncated"):
+        if not isinstance(row[key], bool):
+            raise ValueError(f"P3 resumed {key} must be Boolean")
+    if not row["terminated"] and not row["truncated"]:
+        raise ValueError("P3 resumed episode has no terminal condition")
+    if not isinstance(row["safety"], dict):
+        raise ValueError("P3 resumed safety field must be a mapping")
+
+
+def _load_episode_shard(
+    path: Path,
+    *,
+    run_fingerprint: str,
+    expected: Mapping[str, Any],
+    victim_policy_state_sha256: str,
+    config: P3AuditConfig,
+    clean_by_seed: Mapping[int, Mapping[str, Any]],
+    effective_epsilon: np.ndarray,
+) -> list[dict[str, Any]]:
+    payload = _mapping(
+        _strict_json_load(path, location="P3 episode shard"),
+        "P3 episode shard",
+    )
+    required = {
+        "schema_version",
+        "status",
+        "run_fingerprint_sha256",
+        "shard_key_sha256",
+        "identity",
+        "victim_policy_state_sha256",
+        "episode_seeds",
+        "record_count",
+        "records_sha256",
+        "episodes",
+    }
+    _strict_keys(
+        payload,
+        allowed=required,
+        required=required,
+        location="P3 episode shard",
+    )
+    if (
+        payload["schema_version"] != SHARD_SCHEMA_VERSION
+        or payload["status"] != "complete"
+        or payload["run_fingerprint_sha256"] != run_fingerprint
+        or payload["shard_key_sha256"] != expected["shard_key_sha256"]
+        or payload["identity"] != expected["identity"]
+        or payload["victim_policy_state_sha256"] != victim_policy_state_sha256
+    ):
+        raise ValueError("P3 episode shard identity or fingerprint does not match")
+    expected_seeds = list(config.episode_seeds)
+    if payload["episode_seeds"] != expected_seeds:
+        raise ValueError("P3 episode shard does not contain the exact seed cohort")
+    episodes = payload["episodes"]
+    if not isinstance(episodes, list):
+        raise ValueError("P3 episode shard episodes must be a list")
+    if payload["record_count"] != len(expected_seeds) or len(episodes) != len(
+        expected_seeds
+    ):
+        raise ValueError("P3 episode shard is incomplete")
+    if payload["records_sha256"] != _canonical_json_sha256(episodes):
+        raise ValueError("P3 episode shard record hash mismatch")
+    observed_seeds = []
+    for raw_row in episodes:
+        row = _mapping(raw_row, "P3 resumed attacked episode")
+        seed = _non_negative_int(row.get("episode_seed"), "shard episode_seed")
+        observed_seeds.append(seed)
+        if seed not in clean_by_seed:
+            raise ValueError("P3 episode shard contains an unknown episode seed")
+        _validate_resumed_episode(
+            row,
+            config=config,
+            identity=expected["identity"],
+            clean=clean_by_seed[seed],
+            effective_epsilon=effective_epsilon,
+        )
+    if observed_seeds != expected_seeds:
+        raise ValueError("P3 episode shard seed order or membership is invalid")
+    return [dict(row) for row in episodes]
+
+
+def _write_episode_shard(
+    path: Path,
+    *,
+    run_fingerprint: str,
+    expected: Mapping[str, Any],
+    victim_policy_state_sha256: str,
+    episode_seeds: Sequence[int],
+    episodes: Sequence[Mapping[str, Any]],
+) -> None:
+    if path.exists():
+        raise FileExistsError(f"refusing to replace an existing P3 shard: {path}")
+    normalized = _jsonable(episodes)
+    payload = {
+        "schema_version": SHARD_SCHEMA_VERSION,
+        "status": "complete",
+        "run_fingerprint_sha256": run_fingerprint,
+        "shard_key_sha256": expected["shard_key_sha256"],
+        "identity": expected["identity"],
+        "victim_policy_state_sha256": victim_policy_state_sha256,
+        "episode_seeds": list(episode_seeds),
+        "record_count": len(normalized),
+        "records_sha256": _canonical_json_sha256(normalized),
+        "episodes": normalized,
+    }
+    _atomic_write_json(path, payload)
+
+
+def _publish_aggregate(
+    output: Path,
+    *,
+    config: P3AuditConfig,
+    clean_records: Sequence[Mapping[str, Any]],
+    episode_records: Sequence[Mapping[str, Any]],
+    summaries: Sequence[Mapping[str, Any]],
+    worst: Mapping[str, Any],
+    manifest_without_artifacts: Mapping[str, Any],
+) -> dict[str, Any]:
+    staging = output / AGGREGATE_STAGING_NAME
+    if staging.exists():
+        if staging.is_symlink() or not staging.is_dir():
+            raise ValueError("P3 aggregate staging path is not a real directory")
+        shutil.rmtree(staging)
+    staging.mkdir(parents=False, exist_ok=False)
+    try:
+        _write_json(staging / "resolved_config.json", config.to_dict())
+        _write_json(
+            staging / "episodes.json",
+            {"clean": clean_records, "attacked": episode_records},
+        )
+        _write_csv(staging / "episodes.csv", episode_records)
+        _write_json(staging / "summaries.json", summaries)
+        _write_csv(staging / "summaries.csv", summaries)
+        _write_json(staging / "worst_over_attacks.json", worst)
+        _write_csv(staging / "worst_over_attacks.csv", worst["episodes"])
+        artifacts: dict[str, Any] = {}
+        for name in _FINAL_ARTIFACT_NAMES[:-1]:
+            staged = staging / name
+            artifacts[name] = {
+                "path": str(output / name),
+                "sha256": sha256_file(staged),
+            }
+        manifest = {**_jsonable(manifest_without_artifacts), "artifacts": artifacts}
+        manifest_path = output / "manifest.json"
+        manifest["artifacts"]["manifest.json"] = {
+            "path": str(manifest_path),
+            "sha256": None,
+            "note": "self-hash intentionally omitted",
+        }
+        _write_json(staging / "manifest.json", manifest)
+
+        # The manifest is the commit marker. It is published only after every
+        # non-self-referential aggregate artifact has reached its final path.
+        if manifest_path.is_file():
+            manifest_path.unlink()
+        for name in _FINAL_ARTIFACT_NAMES[:-1]:
+            os.replace(staging / name, output / name)
+        os.replace(staging / "manifest.json", manifest_path)
+        staging.rmdir()
+        return _jsonable(manifest)
+    except Exception:
+        # A surviving staging directory is a known, non-evidence artifact. A
+        # later --resume discards it and reconstructs solely from full shards.
+        raise
+
+
 def _run_p3_audit_impl(
     config: P3AuditConfig | str | Path,
     *,
     output_directory: str | Path,
     device: str = "cpu",
     overwrite: bool = False,
+    resume: bool = False,
     victim_loader: VictimLoader | None = None,
     environment_factory: EnvironmentFactory | None = None,
     attack_factories: Mapping[str, AttackFactory] | None = None,
@@ -2596,26 +3228,8 @@ def _run_p3_audit_impl(
     if not isinstance(config, P3AuditConfig):
         config = load_p3_audit_config(config)
     output = Path(output_directory).expanduser().resolve()
-    known_artifacts = {
-        "resolved_config.json",
-        "episodes.json",
-        "episodes.csv",
-        "summaries.json",
-        "summaries.csv",
-        "worst_over_attacks.json",
-        "worst_over_attacks.csv",
-        "manifest.json",
-    }
-    if output.exists() and any(output.iterdir()) and not overwrite:
-        raise FileExistsError(
-            f"audit output directory is not empty: {output}; pass overwrite=True"
-        )
-    output.mkdir(parents=True, exist_ok=True)
-    if overwrite:
-        for name in known_artifacts:
-            path = output / name
-            if path.is_file():
-                path.unlink()
+    if resume and overwrite:
+        raise ValueError("resume and overwrite are mutually exclusive")
 
     env_factory = environment_factory or (lambda: _make_default_env(config))
     probe = _agent_env(env_factory)
@@ -2640,17 +3254,60 @@ def _run_p3_audit_impl(
     finally:
         probe.close()
 
+    victim_checkpoint_hashes: dict[str, str] = {}
+    for victim in config.victims:
+        if not victim.checkpoint.is_file():
+            raise FileNotFoundError(
+                f"victim checkpoint does not exist: {victim.checkpoint}"
+            )
+        victim_checkpoint_hashes[victim.name] = sha256_file(victim.checkpoint)
+
     loader = victim_loader or _default_victim_loader
     provided_factories = dict(attack_factories or {})
     attack_resources = _attack_resource_provenance(config)
+    provenance = _repository_provenance()
+    run_inputs = _run_input_contract(
+        config=config,
+        device=device,
+        environment_contract={"id": config.environment_id, **environment_contract},
+        victim_checkpoint_hashes=victim_checkpoint_hashes,
+        attack_resources=attack_resources,
+        provenance=provenance,
+        victim_loader=victim_loader,
+        environment_factory=environment_factory,
+        attack_factories=attack_factories,
+    )
+    run_fingerprint = _canonical_json_sha256(run_inputs)
+    expected_shards = _expected_shards(
+        config,
+        run_fingerprint=run_fingerprint,
+        victim_checkpoint_hashes=victim_checkpoint_hashes,
+    )
+    shard_directory = _prepare_shard_store(
+        output,
+        resume=resume,
+        overwrite=overwrite,
+        run_inputs=run_inputs,
+        run_fingerprint=run_fingerprint,
+        expected_shards=expected_shards,
+    )
+    expected_by_identity = {
+        (
+            str(item["identity"]["victim"]),
+            str(item["identity"]["epsilon_ratio_token"]),
+            str(item["identity"]["attack"]),
+        ): item
+        for item in expected_shards
+    }
     checkpoint_manifest: list[dict[str, Any]] = []
     episode_records: list[dict[str, Any]] = []
     clean_records: list[dict[str, Any]] = []
+    shard_inventory: list[dict[str, Any]] = []
+    reused_shards = 0
+    computed_shards = 0
 
     for victim in config.victims:
-        if not victim.checkpoint.is_file():
-            raise FileNotFoundError(f"victim checkpoint does not exist: {victim.checkpoint}")
-        checkpoint_sha = sha256_file(victim.checkpoint)
+        checkpoint_sha = victim_checkpoint_hashes[victim.name]
         model = loader(victim, victim.checkpoint, device)
         model_space_contract = _validate_victim_space_contract(
             model,
@@ -2713,6 +3370,33 @@ def _run_p3_audit_impl(
                 mutable_mask=mutable_mask,
             )
             for attack_spec in config.attacks:
+                expected = expected_by_identity[
+                    (victim.name, _ratio_token(ratio), attack_spec.name)
+                ]
+                shard_path = shard_directory / str(expected["filename"])
+                if resume and shard_path.is_file():
+                    shard_records = _load_episode_shard(
+                        shard_path,
+                        run_fingerprint=run_fingerprint,
+                        expected=expected,
+                        victim_policy_state_sha256=policy_state_sha,
+                        config=config,
+                        clean_by_seed=clean_by_seed,
+                        effective_epsilon=effective_epsilon,
+                    )
+                    episode_records.extend(shard_records)
+                    reused_shards += 1
+                    shard_inventory.append(
+                        {
+                            "filename": shard_path.name,
+                            "shard_key_sha256": expected["shard_key_sha256"],
+                            "identity": expected["identity"],
+                            "sha256": sha256_file(shard_path),
+                            "reused": True,
+                        }
+                    )
+                    continue
+
                 factory = provided_factories.get(attack_spec.name)
                 if factory is None:
                     factory = _resolve_factory(attack_spec.factory)
@@ -2743,6 +3427,7 @@ def _run_p3_audit_impl(
                     raise TypeError(
                         f"factory for {attack_spec.name!r} did not return an attack"
                     )
+                shard_records: list[dict[str, Any]] = []
                 for episode_seed in config.episode_seeds:
                     attacked = _run_attacked_episode(
                         policy=adapter,
@@ -2764,7 +3449,26 @@ def _run_p3_audit_impl(
                         clean["episode_return"] - attacked["episode_return"]
                     )
                     attacked["paired_clean_safety"] = clean["safety"]
-                    episode_records.append(attacked)
+                    shard_records.append(attacked)
+                _write_episode_shard(
+                    shard_path,
+                    run_fingerprint=run_fingerprint,
+                    expected=expected,
+                    victim_policy_state_sha256=policy_state_sha,
+                    episode_seeds=config.episode_seeds,
+                    episodes=shard_records,
+                )
+                episode_records.extend(shard_records)
+                computed_shards += 1
+                shard_inventory.append(
+                    {
+                        "filename": shard_path.name,
+                        "shard_key_sha256": expected["shard_key_sha256"],
+                        "identity": expected["identity"],
+                        "sha256": sha256_file(shard_path),
+                        "reused": False,
+                    }
+                )
 
         policy_state_sha_after = sb3_policy_state_sha256(model)
         frozen_evidence_after = {
@@ -2789,39 +3493,25 @@ def _run_p3_audit_impl(
 
     summaries = _summarize_attack_records(episode_records, config)
     worst = _worst_over_attacks(episode_records, config)
-    resolved_config_path = output / "resolved_config.json"
-    episodes_json_path = output / "episodes.json"
-    episodes_csv_path = output / "episodes.csv"
-    summaries_json_path = output / "summaries.json"
-    summaries_csv_path = output / "summaries.csv"
-    worst_json_path = output / "worst_over_attacks.json"
-    worst_csv_path = output / "worst_over_attacks.csv"
-    _write_json(resolved_config_path, config.to_dict())
-    _write_json(
-        episodes_json_path,
-        {"clean": clean_records, "attacked": episode_records},
-    )
-    _write_csv(episodes_csv_path, episode_records)
-    _write_json(summaries_json_path, summaries)
-    _write_csv(summaries_csv_path, summaries)
-    _write_json(worst_json_path, worst)
-    _write_csv(worst_csv_path, worst["episodes"])
+    expected_shard_names = {"run.json"} | {
+        str(item["filename"]) for item in expected_shards
+    }
+    observed_shard_names = {path.name for path in shard_directory.iterdir()}
+    if observed_shard_names != expected_shard_names:
+        missing = sorted(expected_shard_names - observed_shard_names)
+        unexpected = sorted(observed_shard_names - expected_shard_names)
+        raise RuntimeError(
+            "P3 shard cohort is not complete before aggregation: "
+            f"missing={missing}, unexpected={unexpected}"
+        )
+    for item in shard_inventory:
+        shard_path = shard_directory / str(item["filename"])
+        if sha256_file(shard_path) != item["sha256"]:
+            raise RuntimeError(f"P3 shard changed during audit execution: {shard_path}")
+    if len(shard_inventory) != len(expected_shards):
+        raise RuntimeError("P3 shard inventory does not match the expected matrix")
 
-    artifacts = {}
-    for path in (
-        resolved_config_path,
-        episodes_json_path,
-        episodes_csv_path,
-        summaries_json_path,
-        summaries_csv_path,
-        worst_json_path,
-        worst_csv_path,
-    ):
-        artifacts[path.name] = {
-            "path": str(path),
-            "sha256": sha256_file(path),
-        }
-    manifest = {
+    manifest_without_artifacts = {
         "schema_version": "rl_attack.p3_reproduced_attack_audit_run.v1",
         "status": "complete",
         "audit": {
@@ -2897,17 +3587,33 @@ def _run_p3_audit_impl(
         ],
         "summaries": summaries,
         "worst_over_attacks": worst["summaries"],
-        "artifacts": artifacts,
-        "provenance": _repository_provenance(),
+        "resume": {
+            "supported": True,
+            "requested": resume,
+            "run_fingerprint_sha256": run_fingerprint,
+            "run_inputs_sha256": _canonical_json_sha256(run_inputs),
+            "run_inputs": run_inputs,
+            "shard_schema_version": SHARD_SCHEMA_VERSION,
+            "run_anchor_schema_version": SHARD_RUN_SCHEMA_VERSION,
+            "shard_store": str(shard_directory),
+            "run_anchor_sha256": sha256_file(shard_directory / "run.json"),
+            "expected_shards": len(expected_shards),
+            "reused_shards": reused_shards,
+            "computed_shards": computed_shards,
+            "aggregation_protocol": "stage_then_replace_manifest_last_v1",
+            "shards": shard_inventory,
+        },
+        "provenance": provenance,
     }
-    manifest_path = output / "manifest.json"
-    manifest["artifacts"]["manifest.json"] = {
-        "path": str(manifest_path),
-        "sha256": None,
-        "note": "self-hash intentionally omitted",
-    }
-    _write_json(manifest_path, manifest)
-    return _jsonable(manifest)
+    return _publish_aggregate(
+        output,
+        config=config,
+        clean_records=clean_records,
+        episode_records=episode_records,
+        summaries=summaries,
+        worst=worst,
+        manifest_without_artifacts=manifest_without_artifacts,
+    )
 
 
 def run_p3_audit(
@@ -2916,12 +3622,15 @@ def run_p3_audit(
     output_directory: str | Path,
     device: str = "cpu",
     overwrite: bool = False,
+    resume: bool = False,
     victim_loader: VictimLoader | None = None,
     environment_factory: EnvironmentFactory | None = None,
     attack_factories: Mapping[str, AttackFactory] | None = None,
 ) -> dict[str, Any]:
     """Run the audit and persist an explicit invalid manifest on fallback."""
 
+    if resume and overwrite:
+        raise ValueError("resume and overwrite are mutually exclusive")
     resolved = config if isinstance(config, P3AuditConfig) else load_p3_audit_config(config)
     output = Path(output_directory).expanduser().resolve()
     try:
@@ -2930,6 +3639,7 @@ def run_p3_audit(
             output_directory=output,
             device=device,
             overwrite=overwrite,
+            resume=resume,
             victim_loader=victim_loader,
             environment_factory=environment_factory,
             attack_factories=attack_factories,
@@ -2948,7 +3658,7 @@ def run_p3_audit(
             if artifact.is_file():
                 artifact.unlink()
         resolved_path = output / "resolved_config.json"
-        _write_json(resolved_path, resolved.to_dict())
+        _atomic_write_json(resolved_path, resolved.to_dict())
         invalid_manifest = {
             "schema_version": "rl_attack.p3_reproduced_attack_audit_run.v1",
             "status": "invalid",
@@ -2966,6 +3676,11 @@ def run_p3_audit(
                 "victim_action_mode": resolved.victim_action_mode,
                 "robust_return_eligible": False,
             },
+            "resume": {
+                "supported": True,
+                "requested": resume,
+                "note": "complete shards remain available for a validated retry",
+            },
             "artifacts": {
                 "resolved_config.json": {
                     "path": str(resolved_path),
@@ -2979,7 +3694,7 @@ def run_p3_audit(
             },
             "provenance": _repository_provenance(),
         }
-        _write_json(output / "manifest.json", invalid_manifest)
+        _atomic_write_json(output / "manifest.json", invalid_manifest)
         raise
 
 
