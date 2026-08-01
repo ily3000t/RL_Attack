@@ -30,7 +30,6 @@ from rl_attack.experiments.p4_audit import (
     _make_default_env,
 )
 
-
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_LOCK = (
     REPOSITORY_ROOT

@@ -35,7 +35,6 @@ from rl_attack.experiments.p3_audit import (
     build_categorical_mad_pgd_attack,
     build_pa_ad_attack,
     build_pgd_ce_attack,
-    build_robust_sarsa_attack,
     derive_seed,
     load_p3_audit_config,
     run_p3_audit,

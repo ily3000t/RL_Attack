@@ -2301,7 +2301,7 @@ def _summarize_attack_records(
         )
         returns = [record["episode_return"] for record in group]
         clean_returns = [record["paired_clean_return"] for record in group]
-        drops = [clean - attacked for clean, attacked in zip(clean_returns, returns)]
+        drops = [clean - attacked for clean, attacked in zip(clean_returns, returns, strict=False)]
         attack_counts = [record["attack_count"] for record in group]
         summary = {
             "victim": victim,
