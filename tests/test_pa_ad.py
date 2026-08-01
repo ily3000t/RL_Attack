@@ -134,6 +134,28 @@ def test_pa_ad_actor_respects_per_feature_box_and_exact_budget() -> None:
     assert all(parameter.grad is None for parameter in policy_a.parameters())
 
 
+def test_pa_ad_actor_accepts_unbounded_box_limits() -> None:
+    clean = np.asarray([0.4, -0.2, 0.1], dtype=np.float32)
+    bounds = PerturbationBounds(
+        epsilon=np.full(3, 0.1, dtype=np.float32),
+        lower=np.asarray([-np.inf, -1.0, -np.inf], dtype=np.float32),
+        upper=np.asarray([np.inf, 1.0, np.inf], dtype=np.float32),
+        mutable_mask=np.ones(3, dtype=bool),
+    )
+    result = PAADPolicyDirectionAttack(
+        bounds,
+        StaticPolicyDirectionDirector([-1.0, 1.0, 0.0]),
+        observation_shape=(3,),
+        steps=2,
+        restarts=1,
+        random_start=True,
+        seed=19,
+    ).generate(clean, CountingPolicy())
+
+    assert np.all(np.isfinite(result.adversarial_observation))
+    assert np.max(np.abs(result.perturbation)) <= 0.1 + 1.0e-6
+
+
 def test_degenerate_direction_and_empty_box_return_zero_perturbation() -> None:
     clean = np.asarray([0.2, 0.0, -0.1], dtype=np.float32)
     zero_director = StaticPolicyDirectionDirector([1.0, 1.0, 1.0])

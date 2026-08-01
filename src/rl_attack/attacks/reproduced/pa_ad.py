@@ -214,6 +214,7 @@ class PAADPolicyDirectionAttack(ObservationAttack):
         value: ArrayLike | None,
         *,
         boolean: bool = False,
+        allow_infinite: bool = False,
     ) -> np.ndarray:
         if value is None:
             raise ValueError(f"{name} is required for the PA-AD sensor contract")
@@ -228,14 +229,20 @@ class PAADPolicyDirectionAttack(ObservationAttack):
                 raise ValueError(f"{name} must contain booleans")
             return raw.astype(np.bool_, copy=False)
         numeric = np.asarray(value, dtype=np.float32)
-        if not np.all(np.isfinite(numeric)):
+        if np.any(np.isnan(numeric)):
+            raise ValueError(f"{name} must not contain NaN")
+        if not allow_infinite and not np.all(np.isfinite(numeric)):
             raise ValueError(f"{name} must be finite")
         return numeric
 
     def _validate_array_contracts(self) -> None:
         epsilon = self._exact_numpy("epsilon", self.bounds.epsilon)
-        lower = self._exact_numpy("lower", self.bounds.lower)
-        upper = self._exact_numpy("upper", self.bounds.upper)
+        lower = self._exact_numpy(
+            "lower", self.bounds.lower, allow_infinite=True
+        )
+        upper = self._exact_numpy(
+            "upper", self.bounds.upper, allow_infinite=True
+        )
         self._exact_numpy("mutable_mask", self.bounds.mutable_mask, boolean=True)
         if np.any(epsilon < 0):
             raise ValueError("epsilon must be non-negative")
