@@ -1,0 +1,10 @@
+# Runtime-critical pins for the audited Highway adapter.
+# Captured from E:\Programs\EnvAnaconda3\envs\pytorch_copy on 2026-08-01.
+# This intentionally identifies the critical runtime surface; it is not a
+# replacement for a fully resolved environment export.
+gymnasium==1.2.2
+highway-env==1.10.2
+numpy==2.2.6
+PyYAML==6.0.2
+stable-baselines3==2.7.1
+torch==2.5.1

@@ -78,6 +78,7 @@ P4_RNG_DERIVATION = "p4-stfa-rng-v1"
 P4_ARGMAX_MODE = "deterministic_argmax"
 P4_PROJECTOR_GUARANTEE = "policy_input_schema_only_not_physical_realizability"
 P4_GENERIC_ENVIRONMENT_REGISTRY = "gymnasium_make_v1"
+P4_HIGHWAY_ENVIRONMENT_REGISTRY = "highway_fast_v0_audited_v1"
 P4_SUMO_ENVIRONMENT_REGISTRY = "sumo_merge_core_v1"
 P4_DISABLED_DISCRETE_PLANNER = "disabled"
 P4_SUMO_DISCRETE_PLANNER = "sumo_merge_core_v1"
@@ -87,6 +88,10 @@ P4_SUMO_ENVIRONMENT_FACTORY = (
 P4_SUMO_ENVIRONMENT_TYPE = (
     "rl_attack.envs.sumo_merge.env.SumoHighwayMergeEnv"
 )
+P4_HIGHWAY_ENVIRONMENT_FACTORY = (
+    "rl_attack.envs.highway_runtime:make_highway_fast_v0_audited"
+)
+P4_HIGHWAY_ENVIRONMENT_TYPE = "highway_env.envs.highway_env.HighwayEnvFast"
 P4_SUMO_PROJECTOR_FACTORY = (
     "rl_attack.experiments.p4_audit:build_sumo_merge_v1_projector"
 )
@@ -879,6 +884,7 @@ def load_p4_audit_config(path: str | Path) -> P4AuditConfig:
         )
     if environment_registry not in {
         P4_GENERIC_ENVIRONMENT_REGISTRY,
+        P4_HIGHWAY_ENVIRONMENT_REGISTRY,
         P4_SUMO_ENVIRONMENT_REGISTRY,
     }:
         raise ValueError("environment.registry_key is not in the P4 registry")
@@ -897,6 +903,15 @@ def load_p4_audit_config(path: str | Path) -> P4AuditConfig:
         raise ValueError(
             "sumo_merge_core_v1 requires its exact registered id, factory, and "
             "runtime type"
+        )
+    if environment_registry == P4_HIGHWAY_ENVIRONMENT_REGISTRY and (
+        environment_id != "highway-fast-v0"
+        or environment_factory != P4_HIGHWAY_ENVIRONMENT_FACTORY
+        or runtime_type != P4_HIGHWAY_ENVIRONMENT_TYPE
+    ):
+        raise ValueError(
+            "highway_fast_v0_audited_v1 requires its exact registered id, "
+            "factory, and runtime type"
         )
     normalization_contract = validate_sha256(
         environment_raw["normalization_contract_sha256"],
@@ -948,6 +963,13 @@ def load_p4_audit_config(path: str | Path) -> P4AuditConfig:
                 "sumo_merge_core_v1 scenario assets are incomplete: "
                 f"{sorted(missing_assets)!r}"
             )
+    if environment_registry == P4_HIGHWAY_ENVIRONMENT_REGISTRY and {
+        item.role for item in scenario_assets
+    } != {"runtime_manifest"}:
+        raise ValueError(
+            "highway_fast_v0_audited_v1 requires exactly one "
+            "runtime_manifest scenario asset"
+        )
     expected_environment_contract = environment_contract_sha256(
         environment_id=environment_id,
         max_episode_steps=max_episode_steps,
@@ -1415,15 +1437,25 @@ def _same_discrete(actual: gym.spaces.Discrete, expected: DiscreteSpaceSpec) -> 
 
 
 def _make_default_env(config: P4AuditConfig) -> gym.Env:
-    if config.environment.registry_key != P4_GENERIC_ENVIRONMENT_REGISTRY:
+    if config.environment.registry_key == P4_GENERIC_ENVIRONMENT_REGISTRY:
+        return gym.make(
+            config.environment.id,
+            max_episode_steps=config.environment.max_episode_steps,
+        )
+    if config.environment.registry_key == P4_HIGHWAY_ENVIRONMENT_REGISTRY:
+        from rl_attack.envs.highway_runtime import make_highway_fast_v0_audited
+
+        return make_highway_fast_v0_audited(
+            max_episode_steps=config.environment.max_episode_steps,
+        )
+    if config.environment.registry_key == P4_SUMO_ENVIRONMENT_REGISTRY:
         raise RuntimeError(
             "the pinned SUMO environment factory is not yet registered for "
             "production construction in P4; use of an injected factory is "
             "test-scope only"
         )
-    return gym.make(
-        config.environment.id,
-        max_episode_steps=config.environment.max_episode_steps,
+    raise RuntimeError(
+        "P4 environment registry was not validated before construction"
     )
 
 
@@ -2982,6 +3014,23 @@ def _execute_p4_audit(
             raise FileNotFoundError(f"{label} does not exist: {path}")
         if sha256_file(path) != expected:
             raise ValueError(f"{label} SHA-256 mismatch")
+
+    if config.environment.registry_key == P4_HIGHWAY_ENVIRONMENT_REGISTRY:
+        from rl_attack.envs.highway_manifest import (
+            find_git_repository_root,
+            verify_highway_runtime_manifest,
+        )
+
+        runtime_manifest = next(
+            asset
+            for asset in config.environment.scenario_assets
+            if asset.role == "runtime_manifest"
+        )
+        verify_highway_runtime_manifest(
+            runtime_manifest.path,
+            repository_root=find_git_repository_root(config.config_path.parent),
+            expected_file_sha256=runtime_manifest.sha256,
+        )
 
     env_factory = environment_factory or (lambda: _make_default_env(config))
     probe = _validated_env(env_factory, config)
