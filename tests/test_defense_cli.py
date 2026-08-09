@@ -41,9 +41,107 @@ class _MatrixObservationEnv(gym.Env):
         return self._observation(), 1.0, terminated, False, {}
 
 
+class _HighwayLikeEnv(gym.Env):
+    metadata = {"render_modes": []}
+
+    def __init__(self):
+        self.observation_space = gym.spaces.Box(
+            low=-np.inf,
+            high=np.inf,
+            shape=(5, 5),
+            dtype=np.float32,
+        )
+        self.action_space = gym.spaces.Discrete(5)
+        self._step = 0
+
+    def reset(self, *, seed=None, options=None):
+        super().reset(seed=seed)
+        self._step = 0
+        return np.zeros((5, 5), dtype=np.float32), {"on_road": True}
+
+    def step(self, action):
+        assert self.action_space.contains(action)
+        self._step += 1
+        terminated = self._step >= 2
+        return (
+            np.full((5, 5), self._step, dtype=np.float32),
+            1.0,
+            terminated,
+            False,
+            {"on_road": True},
+        )
+
+
 _MATRIX_ENV_ID = "RLAttackMatrixObservation-v0"
 if _MATRIX_ENV_ID not in gym.registry:
     gym.register(id=_MATRIX_ENV_ID, entry_point=_MatrixObservationEnv)
+
+
+def _write_test_highway_runtime_manifest(tmp_path: Path):
+    from rl_attack.core.artifacts import canonical_json_sha256
+    from rl_attack.envs.highway_manifest import (
+        HIGHWAY_RUNTIME_MANIFEST_SCHEMA,
+        HIGHWAY_RUNTIME_PAYLOAD_SCHEMA,
+    )
+    from rl_attack.envs.highway_runtime import (
+        HIGHWAY_RUNTIME_FACTORY,
+        HIGHWAY_RUNTIME_REGISTRY_KEY,
+    )
+
+    repository_root = Path(__file__).resolve().parents[1]
+    dependency_lock = (
+        repository_root
+        / "requirements"
+        / "highway-runtime-py310-windows.lock.txt"
+    )
+    dependency_lock_sha256 = defense_baseline._sha256(dependency_lock)
+    payload = {
+        "schema_version": HIGHWAY_RUNTIME_PAYLOAD_SCHEMA,
+        "dependencies": {
+            "lock_path": dependency_lock.relative_to(repository_root).as_posix(),
+            "lock_sha256": dependency_lock_sha256,
+        },
+        "environment": {
+            "identity": {
+                "id": "highway-fast-v0",
+                "factory": HIGHWAY_RUNTIME_FACTORY,
+                "registry_key": HIGHWAY_RUNTIME_REGISTRY_KEY,
+                "max_episode_steps": 30,
+            }
+        },
+    }
+    payload_sha256 = canonical_json_sha256(payload)
+    manifest = {
+        "schema_version": HIGHWAY_RUNTIME_MANIFEST_SCHEMA,
+        "payload": payload,
+        "payload_sha256": payload_sha256,
+    }
+    manifest_path = tmp_path / "highway_runtime.json"
+    manifest_path.write_text(
+        json.dumps(manifest, sort_keys=True),
+        encoding="utf-8",
+    )
+    return {
+        "path": manifest_path,
+        "manifest_sha256": defense_baseline._sha256(manifest_path),
+        "payload_sha256": payload_sha256,
+        "dependency_lock_sha256": dependency_lock_sha256,
+    }
+
+
+def _highway_pin_arguments(pins) -> list[str]:
+    return [
+        "--env-id",
+        "highway-fast-v0",
+        "--runtime-manifest",
+        str(pins["path"]),
+        "--runtime-manifest-sha256",
+        pins["manifest_sha256"],
+        "--runtime-payload-sha256",
+        pins["payload_sha256"],
+        "--dependency-lock-sha256",
+        pins["dependency_lock_sha256"],
+    ]
 
 
 @pytest.mark.parametrize(
@@ -162,6 +260,7 @@ def test_cli_flattens_matrix_observations_and_preserves_checkpoint_lineage(tmp_p
         "source_shape": [2, 2],
         "target_shape": [4],
     }
+    assert "audited_runtime" not in environment
     requested = train_manifest["training"]["requested"]
     effective = train_manifest["training"]["effective"]
     assert requested["seed"] == 17
@@ -293,6 +392,149 @@ def test_highway_experiment_declares_adapter_and_new_robust_fields():
     assert car["adversarial_loss_coef"] == 1.0
     assert car["policy_consistency_coef"] == 0.0
     assert car["value_consistency_coef"] == 0.0
+
+
+def test_highway_runtime_pins_are_all_required_and_forbidden_for_cartpole(tmp_path):
+    pins = _write_test_highway_runtime_manifest(tmp_path)
+    highway_args = defense_baseline._parser().parse_args(
+        ["--env-id", "highway-fast-v0"]
+    )
+    with pytest.raises(ValueError, match="requires all audited runtime pins"):
+        defense_baseline._validate_args(highway_args)
+
+    cartpole_args = defense_baseline._parser().parse_args(
+        [
+            "--env-id",
+            "CartPole-v1",
+            "--runtime-manifest",
+            str(pins["path"]),
+        ]
+    )
+    with pytest.raises(ValueError, match="forbidden for non-Highway"):
+        defense_baseline._validate_args(cartpole_args)
+
+
+@pytest.mark.parametrize(
+    ("argument", "message"),
+    [
+        ("runtime_manifest_sha256", "manifest file SHA-256 mismatch"),
+        ("runtime_payload_sha256", "payload SHA-256 mismatch"),
+        ("dependency_lock_sha256", "dependency lock SHA-256 mismatch"),
+    ],
+)
+def test_highway_runtime_rejects_each_incorrect_explicit_pin(
+    tmp_path,
+    monkeypatch,
+    argument,
+    message,
+):
+    pins = _write_test_highway_runtime_manifest(tmp_path)
+    pins[argument.removeprefix("runtime_")] = "0" * 64
+    if argument == "dependency_lock_sha256":
+        pins["dependency_lock_sha256"] = "0" * 64
+    args = defense_baseline._parser().parse_args(_highway_pin_arguments(pins))
+    defense_baseline._validate_args(args)
+
+    from rl_attack.envs import highway_manifest
+
+    monkeypatch.setattr(
+        highway_manifest,
+        "verify_highway_runtime_manifest",
+        lambda *unused_args, **unused_kwargs: pytest.fail(
+            "pin mismatch must fail before runtime replay"
+        ),
+    )
+    with pytest.raises(ValueError, match=message):
+        defense_baseline._resolve_audited_highway_runtime(
+            args,
+            Path(__file__).resolve().parents[1],
+        )
+
+
+def test_highway_training_and_clean_eval_share_audited_factory_and_manifest_schema(
+    tmp_path,
+    monkeypatch,
+):
+    pins = _write_test_highway_runtime_manifest(tmp_path)
+    from rl_attack.envs import highway_manifest, highway_runtime
+
+    def verified_runtime(
+        manifest_path,
+        *,
+        repository_root,
+        expected_file_sha256,
+    ):
+        assert Path(manifest_path) == pins["path"]
+        assert Path(repository_root) == Path(__file__).resolve().parents[1]
+        assert expected_file_sha256 == pins["manifest_sha256"]
+        return {
+            "manifest_file_sha256": pins["manifest_sha256"],
+            "payload_sha256": pins["payload_sha256"],
+        }
+
+    factory_calls = []
+
+    def audited_factory(*, max_episode_steps):
+        factory_calls.append(max_episode_steps)
+        return gym.wrappers.FlattenObservation(_HighwayLikeEnv())
+
+    monkeypatch.setattr(
+        highway_manifest,
+        "verify_highway_runtime_manifest",
+        verified_runtime,
+    )
+    monkeypatch.setattr(
+        highway_runtime,
+        "make_highway_fast_v0_audited",
+        audited_factory,
+    )
+    args = defense_baseline._parser().parse_args(
+        [
+            *_highway_pin_arguments(pins),
+            "--method",
+            "vanilla_ppo",
+            "--timesteps",
+            "8",
+            "--eval-episodes",
+            "1",
+            "--n-steps",
+            "8",
+            "--batch-size",
+            "8",
+            "--n-epochs",
+            "1",
+            "--output-dir",
+            str(tmp_path / "runs"),
+            "--run-name",
+            "audited_highway",
+        ]
+    )
+
+    manifest = defense_baseline.run(args)
+
+    assert factory_calls == [30, 30]
+    environment = manifest["environment"]
+    assert environment["raw_observation_space"]["shape"] == [5, 5]
+    assert environment["agent_observation_space"]["shape"] == [25]
+    assert environment["observation_adapter"]["name"] == (
+        "gym.wrappers.FlattenObservation"
+    )
+    assert environment["audited_runtime"] == {
+        "factory": (
+            "rl_attack.envs.highway_runtime:make_highway_fast_v0_audited"
+        ),
+        "registry_key": "highway_fast_v0_audited_v1",
+        "runtime_manifest_sha256": pins["manifest_sha256"],
+        "runtime_payload_sha256": pins["payload_sha256"],
+        "dependency_lock_sha256": pins["dependency_lock_sha256"],
+    }
+    assert set(environment["audited_runtime"]) == {
+        "factory",
+        "registry_key",
+        "runtime_manifest_sha256",
+        "runtime_payload_sha256",
+        "dependency_lock_sha256",
+    }
 
 
 def test_cli_rejects_resume_without_checkpoint():

@@ -9,16 +9,16 @@ import os
 import platform
 import re
 import subprocess
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 import gymnasium as gym
 import numpy as np
 
 from rl_attack.defenses.catalog import defense_method
 from rl_attack.evaluation import evaluate_sb3_policy
-
 
 _METHOD_TO_MODE = {
     "vanilla_ppo": "vanilla",
@@ -65,6 +65,14 @@ _METHOD_DEFAULTS = {
         "car_soft_lambda": 0.1,
     },
 }
+
+_AUDITED_HIGHWAY_ENV_ID = "highway-fast-v0"
+_AUDITED_RUNTIME_ARGUMENTS = (
+    "runtime_manifest",
+    "runtime_manifest_sha256",
+    "runtime_payload_sha256",
+    "dependency_lock_sha256",
+)
 
 
 @dataclass(frozen=True)
@@ -123,6 +131,26 @@ class _InputCheckpoint:
         }
 
 
+@dataclass(frozen=True)
+class _AuditedHighwayRuntime:
+    manifest_path: Path
+    manifest_sha256: str
+    payload_sha256: str
+    dependency_lock_sha256: str
+    max_episode_steps: int
+    factory: str
+    registry_key: str
+
+    def manifest_record(self) -> dict[str, str]:
+        return {
+            "factory": self.factory,
+            "registry_key": self.registry_key,
+            "runtime_manifest_sha256": self.manifest_sha256,
+            "runtime_payload_sha256": self.payload_sha256,
+            "dependency_lock_sha256": self.dependency_lock_sha256,
+        }
+
+
 def _load_training_api() -> _TrainingAPI:
     """Delay the robust-training import so CLI metadata remains inspectable."""
 
@@ -167,6 +195,17 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--load-model", type=Path)
+    parser.add_argument(
+        "--runtime-manifest",
+        type=Path,
+        help=(
+            "Required for highway-fast-v0: frozen audited runtime manifest. "
+            "Forbidden for other environments."
+        ),
+    )
+    parser.add_argument("--runtime-manifest-sha256")
+    parser.add_argument("--runtime-payload-sha256")
+    parser.add_argument("--dependency-lock-sha256")
     parser.add_argument(
         "--output-dir",
         type=Path,
@@ -237,6 +276,28 @@ def _validate_args(args: argparse.Namespace) -> None:
             raise ValueError(f"--{name.replace('_', '-')} cannot be negative")
     if args.run_name is not None and not re.fullmatch(r"[A-Za-z0-9_.-]+", args.run_name):
         raise ValueError("--run-name may contain only letters, digits, dot, underscore, and dash")
+    runtime_arguments = {
+        name: getattr(args, name) for name in _AUDITED_RUNTIME_ARGUMENTS
+    }
+    supplied_runtime_arguments = {
+        name for name, value in runtime_arguments.items() if value is not None
+    }
+    if args.env_id == _AUDITED_HIGHWAY_ENV_ID:
+        missing = sorted(set(_AUDITED_RUNTIME_ARGUMENTS) - supplied_runtime_arguments)
+        if missing:
+            rendered = ", ".join(f"--{name.replace('_', '-')}" for name in missing)
+            raise ValueError(
+                "highway-fast-v0 requires all audited runtime pins; missing: "
+                f"{rendered}"
+            )
+    elif supplied_runtime_arguments:
+        rendered = ", ".join(
+            f"--{name.replace('_', '-')}" for name in sorted(supplied_runtime_arguments)
+        )
+        raise ValueError(
+            "audited Highway runtime arguments are forbidden for non-Highway "
+            f"environments: {rendered}"
+        )
 
 
 def _enum_member(enum_type: Any, value: str) -> Any:
@@ -423,21 +484,173 @@ def _repository_provenance(repository_root: Path) -> dict[str, Any]:
     }
 
 
-def _make_agent_env(env_id: str) -> tuple[gym.Env, _ObservationContract]:
-    env = gym.make(env_id)
+def _reject_duplicate_json_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON mapping key: {key!r}")
+        result[key] = value
+    return result
+
+
+def _strict_json_file(path: Path) -> Any:
+    def reject_constant(value: str) -> None:
+        raise ValueError(f"non-finite JSON constant is forbidden: {value}")
+
+    return json.loads(
+        path.read_text(encoding="utf-8"),
+        object_pairs_hook=_reject_duplicate_json_pairs,
+        parse_constant=reject_constant,
+    )
+
+
+def _resolve_audited_highway_runtime(
+    args: argparse.Namespace,
+    repository_root: Path,
+) -> _AuditedHighwayRuntime | None:
+    if args.env_id != _AUDITED_HIGHWAY_ENV_ID:
+        return None
+
+    from rl_attack.core.artifacts import validate_sha256
+    from rl_attack.envs.highway_manifest import (
+        validate_highway_runtime_manifest,
+        verify_highway_runtime_manifest,
+    )
+    from rl_attack.envs.highway_runtime import (
+        HIGHWAY_RUNTIME_FACTORY,
+        HIGHWAY_RUNTIME_REGISTRY_KEY,
+    )
+
+    manifest_path = args.runtime_manifest.expanduser().resolve()
+    if not manifest_path.is_file():
+        raise FileNotFoundError(
+            f"audited Highway runtime manifest does not exist: {manifest_path}"
+        )
+    expected_manifest_sha256 = validate_sha256(
+        args.runtime_manifest_sha256,
+        name="runtime_manifest_sha256",
+    )
+    expected_payload_sha256 = validate_sha256(
+        args.runtime_payload_sha256,
+        name="runtime_payload_sha256",
+    )
+    expected_dependency_lock_sha256 = validate_sha256(
+        args.dependency_lock_sha256,
+        name="dependency_lock_sha256",
+    )
+    actual_manifest_sha256 = _sha256(manifest_path)
+    if actual_manifest_sha256 != expected_manifest_sha256:
+        raise ValueError("audited Highway runtime manifest file SHA-256 mismatch")
+
+    manifest = validate_highway_runtime_manifest(_strict_json_file(manifest_path))
+    if manifest["payload_sha256"] != expected_payload_sha256:
+        raise ValueError("audited Highway runtime payload SHA-256 mismatch")
+    payload = manifest["payload"]
+    if not isinstance(payload, Mapping):  # pragma: no cover - validator guarantees this
+        raise TypeError("audited Highway runtime payload must be a mapping")
+    dependencies = payload.get("dependencies")
+    environment = payload.get("environment")
+    if not isinstance(dependencies, Mapping) or not isinstance(environment, Mapping):
+        raise ValueError("audited Highway runtime payload is structurally incomplete")
+    identity = environment.get("identity")
+    if not isinstance(identity, Mapping):
+        raise ValueError("audited Highway runtime identity is absent")
+    if dependencies.get("lock_sha256") != expected_dependency_lock_sha256:
+        raise ValueError("audited Highway dependency lock SHA-256 mismatch")
+    expected_identity = {
+        "id": _AUDITED_HIGHWAY_ENV_ID,
+        "factory": HIGHWAY_RUNTIME_FACTORY,
+        "registry_key": HIGHWAY_RUNTIME_REGISTRY_KEY,
+    }
+    for key, expected in expected_identity.items():
+        if identity.get(key) != expected:
+            raise ValueError(f"audited Highway runtime identity {key!r} mismatch")
+    max_episode_steps = identity.get("max_episode_steps")
+    if (
+        isinstance(max_episode_steps, bool)
+        or not isinstance(max_episode_steps, int)
+        or max_episode_steps <= 0
+    ):
+        raise ValueError(
+            "audited Highway runtime identity max_episode_steps must be positive"
+        )
+
+    lock_relative = dependencies.get("lock_path")
+    if not isinstance(lock_relative, str) or not lock_relative:
+        raise ValueError("audited Highway dependency lock_path must be a string")
+    lock_path = (repository_root / lock_relative).resolve()
     try:
+        lock_path.relative_to(repository_root)
+    except ValueError as error:
+        raise ValueError(
+            "audited Highway dependency lock escapes the repository"
+        ) from error
+    if not lock_path.is_file():
+        raise FileNotFoundError(f"audited Highway dependency lock is absent: {lock_path}")
+    if _sha256(lock_path) != expected_dependency_lock_sha256:
+        raise ValueError("audited Highway dependency lock file SHA-256 mismatch")
+
+    evidence = verify_highway_runtime_manifest(
+        manifest_path,
+        repository_root=repository_root,
+        expected_file_sha256=expected_manifest_sha256,
+    )
+    if evidence.get("manifest_file_sha256") != expected_manifest_sha256:
+        raise RuntimeError("Highway runtime verifier returned a different manifest SHA-256")
+    if evidence.get("payload_sha256") != expected_payload_sha256:
+        raise RuntimeError("Highway runtime verifier returned a different payload SHA-256")
+    return _AuditedHighwayRuntime(
+        manifest_path=manifest_path,
+        manifest_sha256=expected_manifest_sha256,
+        payload_sha256=expected_payload_sha256,
+        dependency_lock_sha256=expected_dependency_lock_sha256,
+        max_episode_steps=max_episode_steps,
+        factory=HIGHWAY_RUNTIME_FACTORY,
+        registry_key=HIGHWAY_RUNTIME_REGISTRY_KEY,
+    )
+
+
+def _make_agent_env(
+    env_id: str,
+    *,
+    highway_runtime: _AuditedHighwayRuntime | None = None,
+) -> tuple[gym.Env, _ObservationContract]:
+    if highway_runtime is not None:
+        if env_id != _AUDITED_HIGHWAY_ENV_ID:
+            raise ValueError("audited Highway runtime cannot construct another environment")
+        from rl_attack.envs.highway_runtime import make_highway_fast_v0_audited
+
+        env = make_highway_fast_v0_audited(
+            max_episode_steps=highway_runtime.max_episode_steps
+        )
+        if not isinstance(env, gym.wrappers.FlattenObservation):
+            env.close()
+            raise TypeError("audited Highway factory must return FlattenObservation")
+        raw_observation_space = env.env.observation_space
+        adapter = "gym.wrappers.FlattenObservation"
+        adapter_applied = True
+    else:
+        if env_id == _AUDITED_HIGHWAY_ENV_ID:
+            raise ValueError("highway-fast-v0 requires an audited runtime manifest")
+        env = gym.make(env_id)
         raw_observation_space = env.observation_space
+        try:
+            if not isinstance(raw_observation_space, gym.spaces.Box):
+                raise TypeError("P2 defense baselines require a Box observation space")
+            adapter_applied = len(raw_observation_space.shape) > 1
+            if adapter_applied:
+                env = gym.wrappers.FlattenObservation(env)
+                adapter = "gym.wrappers.FlattenObservation"
+            else:
+                adapter = "identity"
+        except Exception:
+            env.close()
+            raise
+    try:
         if not isinstance(raw_observation_space, gym.spaces.Box):
             raise TypeError("P2 defense baselines require a Box observation space")
         if not isinstance(env.action_space, gym.spaces.Discrete):
             raise TypeError("P2 defense baselines require a Discrete action space")
-
-        adapter_applied = len(raw_observation_space.shape) > 1
-        if adapter_applied:
-            env = gym.wrappers.FlattenObservation(env)
-            adapter = "gym.wrappers.FlattenObservation"
-        else:
-            adapter = "identity"
 
         agent_observation_space = env.observation_space
         if not isinstance(agent_observation_space, gym.spaces.Box):
@@ -511,9 +724,13 @@ def _clean_evaluation(
     *,
     episode_seeds: Sequence[int],
     observation_contract: _ObservationContract,
+    highway_runtime: _AuditedHighwayRuntime | None = None,
 ) -> dict[str, Any]:
     def env_factory() -> gym.Env:
-        env, evaluation_contract = _make_agent_env(env_id)
+        env, evaluation_contract = _make_agent_env(
+            env_id,
+            highway_runtime=highway_runtime,
+        )
         if evaluation_contract != observation_contract:
             env.close()
             raise RuntimeError(
@@ -563,6 +780,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
     repository_root = _repository_root()
     provenance = _repository_provenance(repository_root)
+    highway_runtime = _resolve_audited_highway_runtime(args, repository_root)
     api = _load_training_api()
     requested_robust_config = _build_robust_config(args, api)
     requested_robust_config_data = _jsonable(requested_robust_config)
@@ -572,7 +790,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         )
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    env, observation_contract = _make_agent_env(args.env_id)
+    env, observation_contract = _make_agent_env(
+        args.env_id,
+        highway_runtime=highway_runtime,
+    )
     try:
         if input_checkpoint is not None:
             model = api.RobustPPO.load(
@@ -643,6 +864,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             args.env_id,
             episode_seeds=episode_seeds,
             observation_contract=observation_contract,
+            highway_runtime=highway_runtime,
         )
         effective_robust_config_data = _jsonable(effective_robust_config)
         method_spec = defense_method(args.method)
@@ -650,6 +872,20 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         observation_data = observation_contract.to_dict()
         effective_seed = _jsonable(getattr(model, "seed", None))
         effective_device = str(getattr(model, "device", args.device))
+        environment_manifest: dict[str, Any] = {
+            "id": args.env_id,
+            **observation_data,
+            "action_space": {
+                "repr": repr(env.action_space),
+                "type": type(env.action_space).__name__,
+                "n": int(env.action_space.n),
+                "start": int(env.action_space.start),
+            },
+        }
+        if highway_runtime is not None:
+            environment_manifest["audited_runtime"] = (
+                highway_runtime.manifest_record()
+            )
         manifest = {
             "schema_version": "rl_attack.defense_run.v2",
             "method": {
@@ -667,16 +903,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     "are isolated references and are not imported at runtime."
                 ),
             },
-            "environment": {
-                "id": args.env_id,
-                **observation_data,
-                "action_space": {
-                    "repr": repr(env.action_space),
-                    "type": type(env.action_space).__name__,
-                    "n": int(env.action_space.n),
-                    "start": int(env.action_space.start),
-                },
-            },
+            "environment": environment_manifest,
             "training": {
                 "requested": {
                     "method": args.method,
