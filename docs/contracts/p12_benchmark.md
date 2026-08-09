@@ -15,6 +15,9 @@ rl-attack-p12-benchmark run <resolved-config.yaml> `
   --output-dir <new-output-directory> --device cpu
 rl-attack-p12-benchmark run <resolved-config.yaml> `
   --output-dir <interrupted-output-directory> --device cpu --resume
+rl-attack-p12-benchmark run <resolved-config.yaml> `
+  --output-dir <interrupted-output-directory> --device cpu --resume `
+  --max-new-shards <positive-integer>
 rl-attack-p12-benchmark verify <complete-output-directory>
 ```
 
@@ -22,6 +25,16 @@ There are no CLI overrides for victims, epsilon, attacks, solver budgets,
 episode seeds, or statistics. These values are frozen in the strict YAML input.
 `run` requires an empty new directory; `--resume` requires the exact interrupted
 directory and exact original inputs.
+
+`--max-new-shards N` is an execution-only control for long runs. It counts only
+newly written, complete shards; existing validated shards do not consume the
+quota. If work remains after the quota is reached, the command leaves
+`run_state.status: in_progress`, publishes neither summaries nor
+`manifest.json`, and returns a progress record that requires a later
+`--resume`. The option is not part of the scientific config, plan, fingerprint,
+or final manifest, so slicing does not change the result. A shard remains the
+smallest pause unit: this is not a wall-clock timeout and never interrupts an
+episode cohort midway. `verify` continues to accept only complete bundles.
 
 ## Matrix and pairing
 

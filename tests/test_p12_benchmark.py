@@ -13,6 +13,7 @@ import pytest
 import yaml
 from stable_baselines3 import PPO
 
+from rl_attack.cli import p12_benchmark as p12_cli
 from rl_attack.core.artifacts import canonical_json_sha256, sha256_file
 from rl_attack.defenses.catalog import defense_method
 from rl_attack.defenses.training.robust_ppo import RobustPPOConfig
@@ -681,6 +682,160 @@ def test_full_p2_matrix_flattens_and_pairs_random_streams(tmp_path: Path) -> Non
         assert interval["episodes_per_model_seed"] == 1
 
 
+@pytest.mark.parametrize("value", [True, 1.5, "1"])
+def test_bounded_run_rejects_non_integer_quota_before_writing(
+    tmp_path: Path,
+    value: object,
+) -> None:
+    config_path, models = _write_case(tmp_path / "case")
+    output = tmp_path / "output"
+    with pytest.raises(TypeError, match="max_new_shards must be int or None"):
+        run_benchmark(
+            config_path,
+            output_directory=output,
+            max_new_shards=value,  # type: ignore[arg-type]
+            environment_factory=_MatrixEnv,
+            victim_loader=_loader(models),
+        )
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("value", [0, -1])
+def test_bounded_run_rejects_non_positive_quota_before_writing(
+    tmp_path: Path,
+    value: int,
+) -> None:
+    config_path, models = _write_case(tmp_path / "case")
+    output = tmp_path / "output"
+    with pytest.raises(ValueError, match="max_new_shards must be positive"):
+        run_benchmark(
+            config_path,
+            output_directory=output,
+            max_new_shards=value,
+            environment_factory=_MatrixEnv,
+            victim_loader=_loader(models),
+        )
+    assert not output.exists()
+
+
+def test_bounded_run_pauses_resumes_and_matches_one_shot_science(tmp_path: Path) -> None:
+    config_path, models = _write_case(tmp_path / "case")
+    planned = plan_benchmark(
+        config_path,
+        environment_factory=_MatrixEnv,
+    )
+    expected_shards = int(planned["matrix"]["expected_shards"])
+    sliced_output = tmp_path / "sliced"
+
+    first = run_benchmark(
+        config_path,
+        output_directory=sliced_output,
+        max_new_shards=3,
+        environment_factory=_MatrixEnv,
+        victim_loader=_loader(models),
+    )
+    plan = json.loads((sliced_output / "plan.json").read_text(encoding="utf-8"))
+    assert first == {
+        "result_type": "benchmark_progress",
+        "status": "in_progress",
+        "run_fingerprint": plan["run_fingerprint"],
+        "completed_shards": 3,
+        "expected_shards": expected_shards,
+        "remaining_shards": expected_shards - 3,
+        "new_shards_this_invocation": 3,
+        "resume_required": True,
+        "manifest_published": False,
+    }
+    state = json.loads((sliced_output / "run_state.json").read_text(encoding="utf-8"))
+    assert state["status"] == "in_progress"
+    assert state["completed_shards"] == 3
+    assert sum((sliced_output / shard["path"]).is_file() for shard in plan["shards"]) == 3
+    assert not (sliced_output / "manifest.json").exists()
+    assert not (sliced_output / "episodes.json").exists()
+
+    second = run_benchmark(
+        config_path,
+        output_directory=sliced_output,
+        resume=True,
+        max_new_shards=2,
+        environment_factory=_MatrixEnv,
+        victim_loader=_loader(models),
+    )
+    assert second["new_shards_this_invocation"] == 2
+    assert second["completed_shards"] == 5
+    assert second["run_fingerprint"] == first["run_fingerprint"]
+    state = json.loads((sliced_output / "run_state.json").read_text(encoding="utf-8"))
+    assert state["resume_count"] == 1
+    assert sum((sliced_output / shard["path"]).is_file() for shard in plan["shards"]) == 5
+
+    sliced_manifest = run_benchmark(
+        config_path,
+        output_directory=sliced_output,
+        resume=True,
+        environment_factory=_MatrixEnv,
+        victim_loader=_loader(models),
+    )
+    assert sliced_manifest["status"] == "complete"
+    assert verify_benchmark_output(sliced_output)["status"] == "verified"
+
+    one_shot_output = tmp_path / "one-shot"
+    one_shot_manifest = run_benchmark(
+        config_path,
+        output_directory=one_shot_output,
+        max_new_shards=expected_shards,
+        environment_factory=_MatrixEnv,
+        victim_loader=_loader(models),
+    )
+    assert one_shot_manifest["status"] == "complete"
+    assert verify_benchmark_output(one_shot_output)["status"] == "verified"
+
+    science_files = (
+        "episodes.json",
+        "episodes.csv",
+        "checkpoint_summaries.json",
+        "checkpoint_summaries.csv",
+        "method_summaries.json",
+        "method_summaries.csv",
+        "worst_over_attacks.json",
+        "worst_over_attacks.csv",
+        "paired_comparisons.json",
+        "paired_comparisons.csv",
+    )
+    for name in science_files:
+        assert (sliced_output / name).read_bytes() == (one_shot_output / name).read_bytes()
+    for shard in plan["shards"]:
+        relative = shard["path"]
+        assert (sliced_output / relative).read_bytes() == (one_shot_output / relative).read_bytes()
+    for key in ("benchmark", "environment", "victims", "statistics", "provenance"):
+        assert sliced_manifest[key] == one_shot_manifest[key]
+
+
+def test_bounded_run_cli_accepts_only_positive_integer_quota() -> None:
+    args = p12_cli._parser().parse_args(
+        [
+            "run",
+            "benchmark.yaml",
+            "--output-dir",
+            "output",
+            "--max-new-shards",
+            "7",
+        ]
+    )
+    assert args.max_new_shards == 7
+    for value in ("0", "-1", "not-an-integer"):
+        with pytest.raises(SystemExit):
+            p12_cli._parser().parse_args(
+                [
+                    "run",
+                    "benchmark.yaml",
+                    "--output-dir",
+                    "output",
+                    "--max-new-shards",
+                    value,
+                ]
+            )
+
+
 def test_resume_validates_existing_shards_and_tampering(tmp_path: Path, monkeypatch) -> None:
     config_path, models = _write_case(tmp_path / "case")
     output = tmp_path / "resumed"
@@ -723,6 +878,7 @@ def test_resume_validates_existing_shards_and_tampering(tmp_path: Path, monkeypa
             config_path,
             output_directory=output,
             resume=True,
+            max_new_shards=1,
             environment_factory=_MatrixEnv,
             victim_loader=_loader(models),
         )

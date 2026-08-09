@@ -3989,13 +3989,19 @@ def run_benchmark(
     output_directory: str | Path,
     device: str = "cpu",
     resume: bool = False,
+    max_new_shards: int | None = None,
     environment_factory: EnvironmentFactory | None = None,
     victim_loader: VictimLoader | None = None,
 ) -> dict[str, Any]:
-    """Run or safely resume the complete paired benchmark matrix."""
+    """Run, pause at a complete-shard boundary, or safely resume the matrix."""
 
     if type(resume) is not bool:
         raise TypeError("resume must be bool")
+    if max_new_shards is not None:
+        if type(max_new_shards) is not int:
+            raise TypeError("max_new_shards must be int or None")
+        if max_new_shards <= 0:
+            raise ValueError("max_new_shards must be positive")
     resolved = config if isinstance(config, BenchmarkConfig) else load_benchmark_config(config)
     factory, runtime, victim_inputs, provenance, plan = _prepare_run(
         resolved,
@@ -4029,6 +4035,9 @@ def run_benchmark(
     victim_runtime_records: list[dict[str, Any]] = []
     policy_state_owners: dict[str, str] = {}
     completed_shards = 0
+    new_shards_this_invocation = 0
+    expected_shards = int(plan["matrix"]["expected_shards"])
+    pause_requested = False
     run_fingerprint = str(plan["run_fingerprint"])
     episode_seeds = resolved.episode_seeds
     mutable_mask = np.asarray(resolved.epsilon.mutable_mask, dtype=bool)
@@ -4073,7 +4082,7 @@ def run_benchmark(
                 for episode_seed in episode_seeds
             ]
 
-        clean_rows, _ = _read_or_write_shard(
+        clean_rows, clean_created = _read_or_write_shard(
             output,
             expected=clean_expected,
             run_fingerprint=run_fingerprint,
@@ -4084,12 +4093,21 @@ def run_benchmark(
             produce=produce_clean,
         )
         completed_shards += 1
+        new_shards_this_invocation += int(clean_created)
         all_rows.extend(clean_rows)
+        state["completed_shards"] = completed_shards
+        strict_json_write(output / "run_state.json", state)
         clean_by_seed = {
             int(row["episode_seed"]): float(row["episode_return"]) for row in clean_rows
         }
 
-        for ratio in resolved.epsilon.ratios:
+        pause_requested = (
+            max_new_shards is not None
+            and new_shards_this_invocation >= max_new_shards
+            and completed_shards < expected_shards
+        )
+
+        for ratio in () if pause_requested else resolved.epsilon.ratios:
             epsilon = resolved.epsilon.effective(ratio)
             bounds = PerturbationBounds(
                 epsilon=epsilon,
@@ -4134,7 +4152,7 @@ def run_benchmark(
                         for episode_seed in episode_seeds
                     ]
 
-                attack_rows, _ = _read_or_write_shard(
+                attack_rows, attack_created = _read_or_write_shard(
                     output,
                     expected=expected,
                     run_fingerprint=run_fingerprint,
@@ -4145,9 +4163,19 @@ def run_benchmark(
                     produce=produce_attacked,
                 )
                 completed_shards += 1
+                new_shards_this_invocation += int(attack_created)
                 all_rows.extend(attack_rows)
                 state["completed_shards"] = completed_shards
                 strict_json_write(output / "run_state.json", state)
+                pause_requested = (
+                    max_new_shards is not None
+                    and new_shards_this_invocation >= max_new_shards
+                    and completed_shards < expected_shards
+                )
+                if pause_requested:
+                    break
+            if pause_requested:
+                break
 
         policy_state_after = sb3_policy_state_sha256(model)
         if policy_state_after != policy_state_before:
@@ -4169,6 +4197,18 @@ def run_benchmark(
                 "frozen": True,
             }
         )
+        if pause_requested:
+            return {
+                "result_type": "benchmark_progress",
+                "status": "in_progress",
+                "run_fingerprint": run_fingerprint,
+                "completed_shards": completed_shards,
+                "expected_shards": expected_shards,
+                "remaining_shards": expected_shards - completed_shards,
+                "new_shards_this_invocation": new_shards_this_invocation,
+                "resume_required": True,
+                "manifest_published": False,
+            }
 
     # Shards, not accumulated process memory or an earlier manifest, are the
     # sole scientific source for finalization.  The explicit finalizing state
@@ -4177,7 +4217,7 @@ def run_benchmark(
         {
             "status": "finalizing",
             "completed_shards": completed_shards,
-            "expected_shards": plan["matrix"]["expected_shards"],
+            "expected_shards": expected_shards,
         }
     )
     strict_json_write(output / "run_state.json", state)

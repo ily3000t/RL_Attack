@@ -12,6 +12,13 @@ from rl_attack.experiments.p12_benchmark import (
 )
 
 
+def _positive_integer(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("value must be a positive integer")
+    return parsed
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Plan, run, resume, or verify the frozen P1/P2 paired benchmark"
@@ -27,6 +34,11 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--output-dir", type=Path, required=True)
     run.add_argument("--device", default="cpu")
     run.add_argument("--resume", action="store_true")
+    run.add_argument(
+        "--max-new-shards",
+        type=_positive_integer,
+        help="pause after writing at most this many new complete shards",
+    )
 
     verify = commands.add_parser("verify", help="verify an existing complete bundle")
     verify.add_argument("output_dir", type=Path)
@@ -43,6 +55,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             output_directory=args.output_dir,
             device=args.device,
             resume=args.resume,
+            max_new_shards=args.max_new_shards,
         )
     else:
         result = verify_benchmark_output(args.output_dir)
