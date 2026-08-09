@@ -41,6 +41,8 @@ rl-attack-p4-audit = "rl_attack.cli.p4_audit:main"
 rl-attack-train-stfa = "rl_attack.cli.stfa_training:main"
 rl-attack-p5-audit = "rl_attack.cli.p5_audit:main"
 rl-attack-train-rapid-guard = "rl_attack.cli.rapid_guard_training:main"
+rl-attack-p12-benchmark = "rl_attack.cli.p12_benchmark:main"
+rl-attack-highway-runtime = "rl_attack.cli.highway_runtime:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
