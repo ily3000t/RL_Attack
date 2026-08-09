@@ -199,6 +199,8 @@ and unexpected shard files are rejected during run, resume, and verify.
 
 Internal SHA-256 records detect corruption and inconsistent rewrites; they do
 not authenticate an adversary because no secret key or signature is involved.
+The hash-bound core dependency lock is forced to LF bytes by `.gitattributes`,
+so its raw file SHA-256 is stable across Windows worktrees and clones.
 For external tamper evidence, publish the final `manifest.json` SHA-256 through
 an independent trusted channel. The manifest intentionally has no recursive
 self-hash.

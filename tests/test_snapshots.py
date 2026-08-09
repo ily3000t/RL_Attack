@@ -5,7 +5,6 @@ import json
 import re
 from pathlib import Path
 
-
 SHA1 = re.compile(r"^[0-9a-f]{40}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
@@ -21,9 +20,7 @@ def _sha256(path: Path) -> str:
 def test_sumo_scenario_snapshot_matches_provenance() -> None:
     root = Path(__file__).resolve().parents[1]
     snapshot = root / "scenarios" / "highway_merge" / "v1"
-    provenance = json.loads(
-        (snapshot / "PROVENANCE.json").read_text(encoding="utf-8")
-    )
+    provenance = json.loads((snapshot / "PROVENANCE.json").read_text(encoding="utf-8"))
     assert SHA1.fullmatch(provenance["source_commit"])
     assert provenance["contract_version"] == "sumo_merge_core_v1"
     for name, expected in provenance["files"].items():
@@ -33,9 +30,7 @@ def test_sumo_scenario_snapshot_matches_provenance() -> None:
 
 def test_upstream_repositories_are_locked_to_full_commits() -> None:
     root = Path(__file__).resolve().parents[1]
-    manifest = json.loads(
-        (root / "third_party" / "upstream-lock.json").read_text(encoding="utf-8")
-    )
+    manifest = json.loads((root / "third_party" / "upstream-lock.json").read_text(encoding="utf-8"))
     repositories = manifest["repositories"]
     assert len(repositories) == 6
     assert len({entry["name"] for entry in repositories}) == len(repositories)
@@ -59,3 +54,11 @@ def test_core_dependency_lock_contains_only_exact_unique_versions() -> None:
     assert all(line.count("==") == 1 for line in entries)
     names = [re.sub(r"[-_.]+", "-", line.split("==", 1)[0]).lower() for line in entries]
     assert len(names) == len(set(names))
+
+
+def test_hash_bound_core_dependency_lock_has_portable_lf_bytes() -> None:
+    root = Path(__file__).resolve().parents[1]
+    lock_relative = "requirements/core-py310-windows.lock.txt"
+    attributes = (root / ".gitattributes").read_text(encoding="utf-8").splitlines()
+    assert f"{lock_relative} text eol=lf" in attributes
+    assert b"\r\n" not in (root / lock_relative).read_bytes()
