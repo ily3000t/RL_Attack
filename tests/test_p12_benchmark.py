@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import importlib.metadata
 import json
 import platform
@@ -69,8 +70,13 @@ class _MatrixEnv(gym.Env):
         )
 
 
-def _policy_model(seed: int, *, method: str) -> PPO:
-    env = gym.wrappers.FlattenObservation(_MatrixEnv())
+def _policy_model(
+    seed: int,
+    *,
+    method: str,
+    environment: gym.Env | None = None,
+) -> PPO:
+    env = environment or gym.wrappers.FlattenObservation(_MatrixEnv())
     model = PPO(
         "MlpPolicy",
         env,
@@ -125,6 +131,7 @@ def _training_manifest(
     checkpoint: Path,
     checkpoint_sha: str,
     manifest_path: Path,
+    environment_payload: dict | None = None,
 ) -> dict:
     spec = defense_method(method)
     robust = RobustPPOConfig(mode=METHOD_TO_MODE[method]).to_dict()
@@ -151,7 +158,8 @@ def _training_manifest(
             "upstream_runtime_dependency": False,
             "boundary": "strict synthetic test fixture",
         },
-        "environment": {
+        "environment": environment_payload
+        or {
             "id": "RLAttackP12Matrix-v0",
             "raw_observation_space": {
                 "repr": "Box(-1.0, 1.0, (2, 2), float32)",
@@ -271,9 +279,51 @@ def _write_case(
     phase: str = "p2",
     family: str = "gymnasium_standard",
     real_checkpoint: bool = False,
+    builtin_environment: bool = False,
     training_seeds: tuple[int, ...] = (0,),
 ) -> tuple[Path, dict[str, PPO]]:
     tmp_path.mkdir(parents=True, exist_ok=True)
+    if builtin_environment and not real_checkpoint:
+        raise ValueError("builtin_environment requires real_checkpoint")
+    environment_id = "CartPole-v1" if builtin_environment else "RLAttackP12Matrix-v0"
+    environment_payload = None
+    if builtin_environment:
+        probe = gym.make(environment_id, max_episode_steps=2)
+        try:
+            observation_space = probe.observation_space
+            action_space = probe.action_space
+            assert isinstance(observation_space, gym.spaces.Box)
+            assert isinstance(action_space, gym.spaces.Discrete)
+            shape = list(observation_space.shape)
+            environment_payload = {
+                "id": environment_id,
+                "raw_observation_space": {
+                    "repr": repr(observation_space),
+                    "shape": shape,
+                    "dtype": str(observation_space.dtype),
+                },
+                "agent_observation_space": {
+                    "repr": repr(observation_space),
+                    "shape": shape,
+                    "dtype": str(observation_space.dtype),
+                },
+                "observation_adapter": {
+                    "name": "identity",
+                    "applied": False,
+                    "order": "C",
+                    "layout": "row-major",
+                    "source_shape": shape,
+                    "target_shape": shape,
+                },
+                "action_space": {
+                    "repr": repr(action_space),
+                    "type": "Discrete",
+                    "n": int(action_space.n),
+                    "start": int(action_space.start),
+                },
+            }
+        finally:
+            probe.close()
     methods = ["vanilla_ppo"] if phase == "p1" else ["vanilla_ppo", "adv_ppo", "sa_ppo", "car_ppo"]
     victims = []
     models: dict[str, PPO] = {}
@@ -281,7 +331,14 @@ def _write_case(
     for training_seed in training_seeds:
         for method in methods:
             victim_name = f"{method}_seed{training_seed}"
-            model = _policy_model(11 + model_index, method=method)
+            model_environment = (
+                gym.make(environment_id, max_episode_steps=2) if builtin_environment else None
+            )
+            model = _policy_model(
+                11 + model_index,
+                method=method,
+                environment=model_environment,
+            )
             model_index += 1
             models[victim_name] = model
             checkpoint = tmp_path / f"{victim_name}.zip"
@@ -299,6 +356,7 @@ def _write_case(
                         checkpoint=checkpoint,
                         checkpoint_sha=checkpoint_sha,
                         manifest_path=manifest,
+                        environment_payload=environment_payload,
                     ),
                     indent=2,
                     sort_keys=True,
@@ -331,7 +389,7 @@ def _write_case(
             "episode_seed_count": 1,
         },
         "environment": {
-            "id": "RLAttackP12Matrix-v0",
+            "id": environment_id,
             "family": family,
             "max_episode_steps": 2,
             "observation_adapter": {
@@ -836,6 +894,115 @@ def test_bounded_run_cli_accepts_only_positive_integer_quota() -> None:
             )
 
 
+@pytest.mark.parametrize(
+    ("keyword", "value", "error_type", "message"),
+    [
+        ("workers", True, TypeError, "workers must be int"),
+        ("workers", 0, ValueError, "workers must be positive"),
+        ("worker_torch_threads", 1.5, TypeError, "worker_torch_threads must be int"),
+        ("worker_torch_threads", 0, ValueError, "worker_torch_threads must be positive"),
+    ],
+)
+def test_parallel_controls_reject_invalid_counts_before_writing(
+    tmp_path: Path,
+    keyword: str,
+    value: object,
+    error_type: type[Exception],
+    message: str,
+) -> None:
+    output = tmp_path / "output"
+    with pytest.raises(error_type, match=message):
+        run_benchmark(
+            tmp_path / "not-read.yaml",
+            output_directory=output,
+            **{keyword: value},
+        )
+    assert not output.exists()
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"device": "cuda"}, "requires device='cpu'"),
+        ({"max_new_shards": 1}, "cannot be combined with max_new_shards"),
+        ({"environment_factory": _MatrixEnv}, "requires the default environment factory"),
+        ({"victim_loader": object()}, "requires the default environment factory"),
+    ],
+)
+def test_parallel_mode_rejects_unsafe_combinations_before_writing(
+    tmp_path: Path,
+    kwargs: dict,
+    message: str,
+) -> None:
+    output = tmp_path / "output"
+    with pytest.raises(ValueError, match=message):
+        run_benchmark(
+            tmp_path / "not-read.yaml",
+            output_directory=output,
+            workers=2,
+            **kwargs,
+        )
+    assert not output.exists()
+
+
+@pytest.mark.parametrize(
+    ("claim_tier", "cohort_role"),
+    [
+        ("smoke", "smoke"),
+        ("smoke", "test"),
+        ("development", "validation"),
+    ],
+)
+def test_parallel_mode_is_restricted_to_nonformal_validation_before_writing(
+    tmp_path: Path,
+    claim_tier: str,
+    cohort_role: str,
+) -> None:
+    config_path, _ = _write_case(tmp_path / "case")
+    config = dataclasses.replace(
+        load_benchmark_config(config_path),
+        claim_tier=claim_tier,
+        cohort_role=cohort_role,
+    )
+    output = tmp_path / "output"
+    with pytest.raises(ValueError, match="restricted to claim_tier='smoke'"):
+        run_benchmark(
+            config,
+            output_directory=output,
+            workers=2,
+        )
+    assert not output.exists()
+
+
+def test_parallel_cli_controls_are_positive_integers() -> None:
+    args = p12_cli._parser().parse_args(
+        [
+            "run",
+            "benchmark.yaml",
+            "--output-dir",
+            "output",
+            "--workers",
+            "4",
+            "--worker-torch-threads",
+            "1",
+        ]
+    )
+    assert args.workers == 4
+    assert args.worker_torch_threads == 1
+    for flag in ("--workers", "--worker-torch-threads"):
+        with pytest.raises(SystemExit):
+            p12_cli._parser().parse_args(
+                [
+                    "run",
+                    "benchmark.yaml",
+                    "--output-dir",
+                    "output",
+                    flag,
+                    "0",
+                ]
+            )
+
+
 def test_resume_validates_existing_shards_and_tampering(tmp_path: Path, monkeypatch) -> None:
     config_path, models = _write_case(tmp_path / "case")
     output = tmp_path / "resumed"
@@ -1057,6 +1224,60 @@ def test_default_loader_executes_a_frozen_sb3_p1_victim(tmp_path: Path) -> None:
         == manifest["victims"][0]["policy_state_sha256_after"]
     )
     assert verify_benchmark_output(output)["status"] == "verified"
+
+
+def test_spawned_parallel_runner_completes_default_p2_matrix(tmp_path: Path) -> None:
+    config_path, _ = _write_case(
+        tmp_path / "case",
+        real_checkpoint=True,
+        builtin_environment=True,
+    )
+
+    def select_validation_cohort(payload: dict) -> None:
+        payload["cohort"]["role"] = "validation"
+
+    _rewrite_config(config_path, mutate=select_validation_cohort)
+    sequential_output = tmp_path / "sequential-defaults"
+    sequential_manifest = run_benchmark(
+        config_path,
+        output_directory=sequential_output,
+    )
+    output = tmp_path / "parallel-defaults"
+    manifest = run_benchmark(
+        config_path,
+        output_directory=output,
+        workers=4,
+        worker_torch_threads=1,
+    )
+    config = load_benchmark_config(config_path)
+    assert manifest["benchmark"]["matrix"]["actual_shards"] == 36
+    assert [item["name"] for item in manifest["victims"]] == [
+        victim.name for victim in config.victims
+    ]
+    assert len({item["policy_state_sha256_before"] for item in manifest["victims"]}) == 4
+    verification = verify_benchmark_output(output)
+    assert verification["status"] == "verified"
+    assert verification["rows"] == 36
+    assert verification["shards"] == 36
+    assert manifest["victims"] == sequential_manifest["victims"]
+    plan = json.loads((output / "plan.json").read_text(encoding="utf-8"))
+    science_files = (
+        "episodes.json",
+        "episodes.csv",
+        "checkpoint_summaries.json",
+        "checkpoint_summaries.csv",
+        "method_summaries.json",
+        "method_summaries.csv",
+        "worst_over_attacks.json",
+        "worst_over_attacks.csv",
+        "paired_comparisons.json",
+        "paired_comparisons.csv",
+    )
+    for name in science_files:
+        assert (output / name).read_bytes() == (sequential_output / name).read_bytes()
+    for shard in plan["shards"]:
+        relative = shard["path"]
+        assert (output / relative).read_bytes() == (sequential_output / relative).read_bytes()
 
 
 def test_cli_entrypoint_is_registered() -> None:

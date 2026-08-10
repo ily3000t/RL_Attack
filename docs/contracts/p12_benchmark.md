@@ -14,6 +14,9 @@ rl-attack-p12-benchmark plan <resolved-config.yaml> --device cpu
 rl-attack-p12-benchmark run <resolved-config.yaml> `
   --output-dir <new-output-directory> --device cpu
 rl-attack-p12-benchmark run <resolved-config.yaml> `
+  --output-dir <new-output-directory> --device cpu `
+  --workers <positive-integer> --worker-torch-threads <positive-integer>
+rl-attack-p12-benchmark run <resolved-config.yaml> `
   --output-dir <interrupted-output-directory> --device cpu --resume
 rl-attack-p12-benchmark run <resolved-config.yaml> `
   --output-dir <interrupted-output-directory> --device cpu --resume `
@@ -35,6 +38,24 @@ quota. If work remains after the quota is reached, the command leaves
 or final manifest, so slicing does not change the result. A shard remains the
 smallest pause unit: this is not a wall-clock timeout and never interrupts an
 episode cohort midway. `verify` continues to accept only complete bundles.
+
+Parallel execution is an execution-only screening control. More than one
+worker is accepted only for CPU `gymnasium_standard` runs declared with
+`claim_tier: smoke` and cohort role `validation`, using the built-in environment
+factory and victim loader. It is rejected for injected factories/loaders,
+Highway, development/final claims, test cohorts, non-CPU devices, and any run
+that also specifies `--max-new-shards`. `--worker-torch-threads` bounds each
+worker's intra-op Torch threads; it does not increase the number of victim
+workers.
+
+Worker processes perform evaluation only and return their computed shard
+payloads to the single parent coordinator. Only that parent may publish shards,
+update `run_state.json`, finalize summaries, or write `manifest.json`. Never run
+two coordinators against the same output directory. Worker count and worker
+Torch-thread count do not enter the scientific plan or fingerprint, so changing
+these execution controls does not redefine the matrix. After a hard
+interruption, only complete shards already published by the parent are reusable;
+all work from an unfinished parallel victim batch is recomputed on resume.
 
 ## Matrix and pairing
 

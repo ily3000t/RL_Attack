@@ -35,6 +35,21 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--device", default="cpu")
     run.add_argument("--resume", action="store_true")
     run.add_argument(
+        "--workers",
+        type=_positive_integer,
+        default=1,
+        help=(
+            "spawn this many victim evaluators "
+            "(non-formal smoke/validation, CPU/default dependencies only)"
+        ),
+    )
+    run.add_argument(
+        "--worker-torch-threads",
+        type=_positive_integer,
+        default=1,
+        help="Torch intra-op threads allocated to each spawned evaluator",
+    )
+    run.add_argument(
         "--max-new-shards",
         type=_positive_integer,
         help="pause after writing at most this many new complete shards",
@@ -56,6 +71,8 @@ def main(argv: Sequence[str] | None = None) -> None:
             device=args.device,
             resume=args.resume,
             max_new_shards=args.max_new_shards,
+            workers=args.workers,
+            worker_torch_threads=args.worker_torch_threads,
         )
     else:
         result = verify_benchmark_output(args.output_dir)

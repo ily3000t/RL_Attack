@@ -14,12 +14,14 @@ import importlib.metadata
 import io
 import json
 import math
+import multiprocessing
 import os
 import platform
 import re
 import subprocess
 from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
@@ -3983,6 +3985,398 @@ def _verify_derived_artifacts(
             raise InvalidBenchmark(f"derived CSV does not reproduce from shards: {name}")
 
 
+def _validate_execution_controls(
+    *,
+    workers: int,
+    worker_torch_threads: int,
+    device: str,
+    max_new_shards: int | None,
+    environment_factory: EnvironmentFactory | None,
+    victim_loader: VictimLoader | None,
+) -> None:
+    """Validate process controls before an output directory can be created."""
+
+    if type(workers) is not int:
+        raise TypeError("workers must be int")
+    if workers <= 0:
+        raise ValueError("workers must be positive")
+    if type(worker_torch_threads) is not int:
+        raise TypeError("worker_torch_threads must be int")
+    if worker_torch_threads <= 0:
+        raise ValueError("worker_torch_threads must be positive")
+    if workers == 1:
+        return
+    if str(device).lower() != "cpu":
+        raise ValueError("workers > 1 requires device='cpu'")
+    if max_new_shards is not None:
+        raise ValueError("workers > 1 cannot be combined with max_new_shards")
+    if environment_factory is not None or victim_loader is not None:
+        raise ValueError("workers > 1 requires the default environment factory and victim loader")
+
+
+def _configure_parallel_worker(worker_torch_threads: int) -> None:
+    """Give every spawned evaluator a bounded CPU thread budget."""
+
+    thread_text = str(worker_torch_threads)
+    for variable in (
+        "OMP_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "NUMEXPR_NUM_THREADS",
+    ):
+        os.environ[variable] = thread_text
+    torch.set_num_threads(worker_torch_threads)
+    try:
+        torch.set_num_interop_threads(1)
+    except RuntimeError:
+        if torch.get_num_interop_threads() != 1:
+            raise
+    if torch.get_num_threads() != worker_torch_threads:
+        raise RuntimeError("spawned benchmark worker did not apply its Torch thread budget")
+
+
+def _parallel_victim_evaluation(
+    config: BenchmarkConfig,
+    victim: VictimSpec,
+    plan: Mapping[str, Any],
+    device: str,
+) -> dict[str, Any]:
+    """Evaluate one victim in a spawned process without writing bundle state."""
+
+    runtime = _runtime_from_plan(plan)
+
+    def factory() -> gym.Env:
+        return _default_environment_factory(config)
+
+    verified_input = _verify_victim_inputs(config, victim, runtime)
+    planned_inputs = {
+        str(item["name"]): dict(item) for item in plan["fingerprint_payload"]["victim_inputs"]
+    }
+    if verified_input != planned_inputs.get(victim.name):
+        raise InvalidBenchmark(f"victim {victim.name} inputs changed after planning")
+    model = _default_victim_loader(victim, device)
+    _validate_loaded_model_identity(
+        model,
+        victim=victim,
+        verified_input=verified_input,
+    )
+    _validate_model_spaces(model, runtime)
+    freeze_sb3_victim(model)
+    policy_state_before = sb3_policy_state_sha256(model)
+    adapter = SB3CategoricalPolicyAdapter(model)
+    mutable_mask = np.asarray(config.epsilon.mutable_mask, dtype=bool)
+    shard_lookup = _plan_shard_lookup(plan)
+    shard_results: list[dict[str, Any]] = []
+
+    clean_rows = [
+        _clean_episode(
+            config=config,
+            runtime=runtime,
+            factory=factory,
+            victim=victim,
+            policy=adapter,
+            episode_seed=episode_seed,
+        )
+        for episode_seed in config.episode_seeds
+    ]
+    clean_expected = shard_lookup[(victim.name, "clean", None, None)]
+    shard_results.append(
+        {
+            "shard_id": clean_expected["shard_id"],
+            "rows": clean_rows,
+        }
+    )
+    clean_by_seed = {int(row["episode_seed"]): float(row["episode_return"]) for row in clean_rows}
+    for ratio in config.epsilon.ratios:
+        epsilon = config.epsilon.effective(ratio)
+        bounds = PerturbationBounds(
+            epsilon=epsilon,
+            lower=runtime.observation_low,
+            upper=runtime.observation_high,
+            mutable_mask=mutable_mask,
+        )
+        for attack_spec in config.attacks:
+            attack = _build_attack(attack_spec, bounds)
+            rows = [
+                _attacked_episode(
+                    config=config,
+                    runtime=runtime,
+                    factory=factory,
+                    victim=victim,
+                    policy=adapter,
+                    attack_spec=attack_spec,
+                    attack=attack,
+                    epsilon_ratio=ratio,
+                    epsilon=epsilon,
+                    mutable_mask=mutable_mask,
+                    episode_seed=episode_seed,
+                    paired_clean_return=clean_by_seed[episode_seed],
+                )
+                for episode_seed in config.episode_seeds
+            ]
+            expected = shard_lookup[(victim.name, "attack", attack_spec.name, _ratio_token(ratio))]
+            shard_results.append(
+                {
+                    "shard_id": expected["shard_id"],
+                    "rows": rows,
+                }
+            )
+
+    policy_state_after = sb3_policy_state_sha256(model)
+    if policy_state_after != policy_state_before:
+        raise InvalidBenchmark(f"victim {victim.name} changed during evaluation")
+    if model.policy.training or any(
+        parameter.requires_grad for parameter in model.policy.parameters()
+    ):
+        raise InvalidBenchmark(f"victim {victim.name} lost its frozen invariant")
+    return {
+        "victim": victim.name,
+        "shards": shard_results,
+        "runtime_record": {
+            "name": victim.name,
+            "method": victim.method,
+            "training_seed": victim.training_seed,
+            "checkpoint_sha256": victim.checkpoint.sha256,
+            "manifest_sha256": victim.manifest.sha256,
+            "policy_state_sha256_before": policy_state_before,
+            "policy_state_sha256_after": policy_state_after,
+            "device": str(adapter.device),
+            "frozen": True,
+        },
+        "worker_torch_threads": torch.get_num_threads(),
+        "worker_torch_interop_threads": torch.get_num_interop_threads(),
+    }
+
+
+def _evaluate_victims_in_parallel(
+    config: BenchmarkConfig,
+    plan: Mapping[str, Any],
+    *,
+    device: str,
+    workers: int,
+    worker_torch_threads: int,
+) -> list[dict[str, Any]]:
+    """Spawn bounded victim evaluators and return results in config order."""
+
+    context = multiprocessing.get_context("spawn")
+    with ProcessPoolExecutor(
+        max_workers=min(workers, len(config.victims)),
+        mp_context=context,
+        initializer=_configure_parallel_worker,
+        initargs=(worker_torch_threads,),
+    ) as executor:
+        futures = [
+            executor.submit(_parallel_victim_evaluation, config, victim, plan, device)
+            for victim in config.victims
+        ]
+        results = [future.result() for future in futures]
+
+    policy_state_owners: dict[str, str] = {}
+    for victim, result in zip(config.victims, results, strict=True):
+        if result.get("victim") != victim.name:
+            raise InvalidBenchmark("parallel victim result order or identity changed")
+        if result.get("worker_torch_threads") != worker_torch_threads:
+            raise InvalidBenchmark("parallel victim used an unexpected Torch thread budget")
+        if result.get("worker_torch_interop_threads") != 1:
+            raise InvalidBenchmark("parallel victim used more than one Torch interop thread")
+        record = _mapping(result.get("runtime_record"), f"parallel victim {victim.name}")
+        policy_state = validate_sha256(
+            record.get("policy_state_sha256_before"),
+            name=f"{victim.name} policy state before",
+        )
+        if record.get("policy_state_sha256_after") != policy_state:
+            raise InvalidBenchmark(f"victim {victim.name} changed during parallel evaluation")
+        duplicate_owner = policy_state_owners.get(policy_state)
+        if duplicate_owner is not None:
+            raise InvalidBenchmark(
+                f"victim {victim.name} duplicates the loaded policy state of {duplicate_owner}"
+            )
+        policy_state_owners[policy_state] = victim.name
+        expected_ids = [
+            str(item["shard_id"]) for item in plan["shards"] if item["victim"] == victim.name
+        ]
+        shard_results = result.get("shards")
+        if not isinstance(shard_results, list):
+            raise InvalidBenchmark(f"parallel victim {victim.name} returned malformed shards")
+        actual_ids = [
+            str(_mapping(item, f"parallel victim {victim.name} shard").get("shard_id"))
+            for item in shard_results
+        ]
+        if actual_ids != expected_ids:
+            raise InvalidBenchmark(
+                f"parallel victim {victim.name} returned shards out of plan order"
+            )
+    return results
+
+
+def _write_parallel_shards(
+    output: Path,
+    *,
+    config: BenchmarkConfig,
+    plan: Mapping[str, Any],
+    runtime: _EnvironmentRuntime,
+    state: dict[str, Any],
+    results: Sequence[Mapping[str, Any]],
+) -> tuple[int, list[dict[str, Any]]]:
+    """Publish worker rows in the coordinator, following the frozen plan order."""
+
+    result_by_victim = {str(item["victim"]): item for item in results}
+    completed_shards = 0
+    runtime_records: list[dict[str, Any]] = []
+    run_fingerprint = str(plan["run_fingerprint"])
+    episode_seeds = config.episode_seeds
+    for victim in config.victims:
+        result = result_by_victim[victim.name]
+        shards = {str(item["shard_id"]): item for item in result["shards"]}
+        clean_by_seed: dict[int, float] | None = None
+        for expected in plan["shards"]:
+            if expected["victim"] != victim.name:
+                continue
+            produced = _mapping(
+                shards[str(expected["shard_id"])],
+                f"parallel victim {victim.name} shard",
+            )
+            produced_rows = produced.get("rows")
+            if not isinstance(produced_rows, list):
+                raise InvalidBenchmark(f"parallel victim {victim.name} returned malformed rows")
+            paired = clean_by_seed if expected["condition"] == "attack" else None
+            rows, _ = _read_or_write_shard(
+                output,
+                expected=expected,
+                run_fingerprint=run_fingerprint,
+                episode_seeds=episode_seeds,
+                config=config,
+                runtime_contract_sha256=runtime.contract_sha256,
+                paired_clean_returns=paired,
+                produce=lambda produced_rows=produced_rows: produced_rows,
+            )
+            completed_shards += 1
+            if expected["condition"] == "clean":
+                clean_by_seed = {
+                    int(row["episode_seed"]): float(row["episode_return"]) for row in rows
+                }
+            state["completed_shards"] = completed_shards
+            strict_json_write(output / "run_state.json", state)
+        runtime_records.append(
+            dict(_mapping(result["runtime_record"], f"parallel victim {victim.name}"))
+        )
+    return completed_shards, runtime_records
+
+
+def _finalize_benchmark(
+    output: Path,
+    *,
+    config: BenchmarkConfig,
+    plan: Mapping[str, Any],
+    runtime: _EnvironmentRuntime,
+    state: dict[str, Any],
+    completed_shards: int,
+    victim_inputs: Sequence[Mapping[str, Any]],
+    victim_runtime_records: Sequence[Mapping[str, Any]],
+    provenance: Mapping[str, Any],
+) -> dict[str, Any]:
+    expected_shards = int(plan["matrix"]["expected_shards"])
+    state.update(
+        {
+            "status": "finalizing",
+            "completed_shards": completed_shards,
+            "expected_shards": expected_shards,
+        }
+    )
+    strict_json_write(output / "run_state.json", state)
+    all_rows = _collect_validated_shard_rows(
+        output,
+        config=config,
+        plan=plan,
+        runtime_contract_sha256=runtime.contract_sha256,
+    )
+    json_artifacts, csv_artifacts = _derived_artifacts(all_rows, config)
+    _write_derived_artifacts(output, json_artifacts, csv_artifacts)
+    state["status"] = "complete"
+    strict_json_write(output / "run_state.json", state)
+    artifact_names = (
+        "resolved_config.json",
+        "plan.json",
+        "run_state.json",
+        "episodes.json",
+        "episodes.csv",
+        "checkpoint_summaries.json",
+        "checkpoint_summaries.csv",
+        "method_summaries.json",
+        "method_summaries.csv",
+        "worst_over_attacks.json",
+        "worst_over_attacks.csv",
+        "paired_comparisons.json",
+        "paired_comparisons.csv",
+    )
+    shard_artifacts: dict[str, dict[str, str]] = {}
+    for shard in plan["shards"]:
+        relative = str(shard["path"])
+        path = _bundle_path(
+            output,
+            relative,
+            location="manifest shard artifact",
+            require_file=True,
+        )
+        shard_artifacts[relative] = {"path": relative, "sha256": sha256_file(path)}
+    formal_eligible, formal_reasons = _formal_eligibility(
+        config,
+        plan,
+        victim_inputs,
+        victim_runtime_records=victim_runtime_records,
+    )
+    manifest = {
+        "schema_version": RUN_SCHEMA_VERSION,
+        "status": "complete",
+        "run_fingerprint": plan["run_fingerprint"],
+        "attack_accounting": _jsonable(ATTACK_ACCOUNTING_CONTRACT),
+        "benchmark": {
+            "name": config.name,
+            "phase": config.phase,
+            "claim_tier": config.claim_tier,
+            "cohort_role": config.cohort_role,
+            "source_config": {
+                "path": str(config.config_path),
+                "sha256": config.config_sha256,
+            },
+            "matrix": {
+                **plan["matrix"],
+                "actual_shards": completed_shards,
+                "actual_total_rows": len(all_rows),
+                "paired_complete": True,
+            },
+            "formal_result_eligible": formal_eligible,
+            "formal_ineligibility_reasons": formal_reasons,
+        },
+        "environment": {
+            **runtime.contract,
+            "contract_sha256": runtime.contract_sha256,
+        },
+        "victims": list(victim_runtime_records),
+        "statistics": _jsonable(config.statistics),
+        "provenance": dict(provenance),
+        "integrity_boundary": {
+            "internal_sha256_role": "detects accidental corruption and inconsistent rewrites",
+            "tamper_evidence_requirement": (
+                "publish the final manifest.json SHA-256 through an independent external channel"
+            ),
+            "cryptographic_authentication": False,
+        },
+        "artifacts": {
+            **_artifact_records(output, artifact_names),
+            "shards": shard_artifacts,
+            "manifest.json": {
+                "path": "manifest.json",
+                "sha256": None,
+                "note": "self-hash intentionally omitted",
+            },
+        },
+    }
+    strict_json_write(output / "manifest.json", manifest)
+    verify_benchmark_output(output)
+    return _jsonable(manifest)
+
+
 def run_benchmark(
     config: BenchmarkConfig | str | Path,
     *,
@@ -3990,10 +4384,12 @@ def run_benchmark(
     device: str = "cpu",
     resume: bool = False,
     max_new_shards: int | None = None,
+    workers: int = 1,
+    worker_torch_threads: int = 1,
     environment_factory: EnvironmentFactory | None = None,
     victim_loader: VictimLoader | None = None,
 ) -> dict[str, Any]:
-    """Run, pause at a complete-shard boundary, or safely resume the matrix."""
+    """Run, pause, or resume; process parallelism is non-formal validation only."""
 
     if type(resume) is not bool:
         raise TypeError("resume must be bool")
@@ -4002,7 +4398,23 @@ def run_benchmark(
             raise TypeError("max_new_shards must be int or None")
         if max_new_shards <= 0:
             raise ValueError("max_new_shards must be positive")
+    _validate_execution_controls(
+        workers=workers,
+        worker_torch_threads=worker_torch_threads,
+        device=device,
+        max_new_shards=max_new_shards,
+        environment_factory=environment_factory,
+        victim_loader=victim_loader,
+    )
     resolved = config if isinstance(config, BenchmarkConfig) else load_benchmark_config(config)
+    if workers > 1 and not (
+        resolved.claim_tier == "smoke" and resolved.cohort_role == "validation"
+    ):
+        raise ValueError(
+            "workers > 1 is restricted to claim_tier='smoke' with cohort.role='validation'"
+        )
+    if workers > 1 and resolved.environment.family != "gymnasium_standard":
+        raise ValueError("workers > 1 is restricted to gymnasium_standard environments")
     factory, runtime, victim_inputs, provenance, plan = _prepare_run(
         resolved,
         device=device,
@@ -4028,6 +4440,34 @@ def run_benchmark(
             strict_json_write(output / "run_state.json", state)
         else:
             return _mapping(_strict_json_load(output / "manifest.json"), "manifest")
+
+    if workers > 1:
+        parallel_results = _evaluate_victims_in_parallel(
+            resolved,
+            plan,
+            device=device,
+            workers=workers,
+            worker_torch_threads=worker_torch_threads,
+        )
+        completed_shards, victim_runtime_records = _write_parallel_shards(
+            output,
+            config=resolved,
+            plan=plan,
+            runtime=runtime,
+            state=state,
+            results=parallel_results,
+        )
+        return _finalize_benchmark(
+            output,
+            config=resolved,
+            plan=plan,
+            runtime=runtime,
+            state=state,
+            completed_shards=completed_shards,
+            victim_inputs=victim_inputs,
+            victim_runtime_records=victim_runtime_records,
+            provenance=provenance,
+        )
 
     shard_lookup = _plan_shard_lookup(plan)
     loader = victim_loader or _default_victim_loader
@@ -4210,108 +4650,18 @@ def run_benchmark(
                 "manifest_published": False,
             }
 
-    # Shards, not accumulated process memory or an earlier manifest, are the
-    # sole scientific source for finalization.  The explicit finalizing state
-    # makes every derived artifact safely reconstructible after a crash.
-    state.update(
-        {
-            "status": "finalizing",
-            "completed_shards": completed_shards,
-            "expected_shards": expected_shards,
-        }
-    )
-    strict_json_write(output / "run_state.json", state)
-    all_rows = _collect_validated_shard_rows(
+    # Validated shards are the sole scientific source for both execution modes.
+    return _finalize_benchmark(
         output,
         config=resolved,
         plan=plan,
-        runtime_contract_sha256=runtime.contract_sha256,
-    )
-    json_artifacts, csv_artifacts = _derived_artifacts(all_rows, resolved)
-    _write_derived_artifacts(output, json_artifacts, csv_artifacts)
-    state["status"] = "complete"
-    strict_json_write(output / "run_state.json", state)
-    artifact_names = (
-        "resolved_config.json",
-        "plan.json",
-        "run_state.json",
-        "episodes.json",
-        "episodes.csv",
-        "checkpoint_summaries.json",
-        "checkpoint_summaries.csv",
-        "method_summaries.json",
-        "method_summaries.csv",
-        "worst_over_attacks.json",
-        "worst_over_attacks.csv",
-        "paired_comparisons.json",
-        "paired_comparisons.csv",
-    )
-    shard_artifacts: dict[str, dict[str, str]] = {}
-    for shard in plan["shards"]:
-        relative = str(shard["path"])
-        path = _bundle_path(
-            output,
-            relative,
-            location="manifest shard artifact",
-            require_file=True,
-        )
-        shard_artifacts[relative] = {"path": relative, "sha256": sha256_file(path)}
-    formal_eligible, formal_reasons = _formal_eligibility(
-        resolved,
-        plan,
-        victim_inputs,
+        runtime=runtime,
+        state=state,
+        completed_shards=completed_shards,
+        victim_inputs=victim_inputs,
         victim_runtime_records=victim_runtime_records,
+        provenance=provenance,
     )
-    manifest = {
-        "schema_version": RUN_SCHEMA_VERSION,
-        "status": "complete",
-        "run_fingerprint": run_fingerprint,
-        "attack_accounting": _jsonable(ATTACK_ACCOUNTING_CONTRACT),
-        "benchmark": {
-            "name": resolved.name,
-            "phase": resolved.phase,
-            "claim_tier": resolved.claim_tier,
-            "cohort_role": resolved.cohort_role,
-            "source_config": {
-                "path": str(resolved.config_path),
-                "sha256": resolved.config_sha256,
-            },
-            "matrix": {
-                **plan["matrix"],
-                "actual_shards": completed_shards,
-                "actual_total_rows": len(all_rows),
-                "paired_complete": True,
-            },
-            "formal_result_eligible": formal_eligible,
-            "formal_ineligibility_reasons": formal_reasons,
-        },
-        "environment": {
-            **runtime.contract,
-            "contract_sha256": runtime.contract_sha256,
-        },
-        "victims": victim_runtime_records,
-        "statistics": _jsonable(resolved.statistics),
-        "provenance": provenance,
-        "integrity_boundary": {
-            "internal_sha256_role": "detects accidental corruption and inconsistent rewrites",
-            "tamper_evidence_requirement": (
-                "publish the final manifest.json SHA-256 through an independent external channel"
-            ),
-            "cryptographic_authentication": False,
-        },
-        "artifacts": {
-            **_artifact_records(output, artifact_names),
-            "shards": shard_artifacts,
-            "manifest.json": {
-                "path": "manifest.json",
-                "sha256": None,
-                "note": "self-hash intentionally omitted",
-            },
-        },
-    }
-    strict_json_write(output / "manifest.json", manifest)
-    verify_benchmark_output(output)
-    return _jsonable(manifest)
 
 
 def _validate_plan_against_config(
