@@ -23,6 +23,7 @@ import importlib
 import math
 import os
 import shutil
+import subprocess
 import tempfile
 import uuid
 from collections.abc import Callable, Mapping, Sequence
@@ -68,6 +69,27 @@ from rl_attack.core.artifacts import (
     strict_json_write,
     validate_sha256,
 )
+from rl_attack.envs.mergelite9 import (
+    MERGELITE9_ENVIRONMENT_ID,
+    MERGELITE9_FACTORY,
+    MERGELITE9_MAX_EPISODE_STEPS,
+    MERGELITE9_NORMALIZATION_CONTRACT_SHA256,
+    MERGELITE9_OBSERVATION_HIGH,
+    MERGELITE9_OBSERVATION_LOW,
+    MERGELITE9_OBSERVATION_SHAPE,
+    MERGELITE9_PROJECTOR_CONFIG_SCHEMA,
+    MERGELITE9_PROJECTOR_NAME,
+    MERGELITE9_PROJECTOR_VERSION,
+    MERGELITE9_REGISTRY_KEY,
+    MERGELITE9_RUNTIME_TYPE,
+    MERGELITE9_SAFETY_COST_DEFINITION_SHA256,
+    MERGELITE9_SENSOR_ATTACK_CONTRACT,
+    MERGELITE9_SENSOR_ATTACK_CONTRACT_SHA256,
+    MergeLite9Projector,
+    make_mergelite9,
+    mergelite9_factorization,
+    mergelite9_feature_epsilon,
+)
 from rl_attack.policies.sb3 import SB3CategoricalPolicyAdapter
 from rl_attack.training.pa_ad import freeze_sb3_victim
 from rl_attack.training.robust_sarsa import sb3_policy_state_sha256
@@ -80,6 +102,7 @@ P4_PROJECTOR_GUARANTEE = "policy_input_schema_only_not_physical_realizability"
 P4_GENERIC_ENVIRONMENT_REGISTRY = "gymnasium_make_v1"
 P4_HIGHWAY_ENVIRONMENT_REGISTRY = "highway_fast_v0_audited_v1"
 P4_SUMO_ENVIRONMENT_REGISTRY = "sumo_merge_core_v1"
+P4_MERGELITE_ENVIRONMENT_REGISTRY = MERGELITE9_REGISTRY_KEY
 P4_DISABLED_DISCRETE_PLANNER = "disabled"
 P4_SUMO_DISCRETE_PLANNER = "sumo_merge_core_v1"
 P4_SUMO_ENVIRONMENT_FACTORY = (
@@ -92,6 +115,11 @@ P4_HIGHWAY_ENVIRONMENT_FACTORY = (
     "rl_attack.envs.highway_runtime:make_highway_fast_v0_audited"
 )
 P4_HIGHWAY_ENVIRONMENT_TYPE = "highway_env.envs.highway_env.HighwayEnvFast"
+P4_MERGELITE_ENVIRONMENT_FACTORY = MERGELITE9_FACTORY
+P4_MERGELITE_ENVIRONMENT_TYPE = MERGELITE9_RUNTIME_TYPE
+P4_MERGELITE_PROJECTOR_FACTORY = (
+    "rl_attack.experiments.p4_audit:build_mergelite9_projector"
+)
 P4_SUMO_PROJECTOR_FACTORY = (
     "rl_attack.experiments.p4_audit:build_sumo_merge_v1_projector"
 )
@@ -228,6 +256,19 @@ class EvidenceScope:
 
 
 @dataclass(frozen=True)
+class ClaimContext:
+    claim_tier: str = "unspecified"
+    task_scope: str = "unspecified"
+    formal_statistical_claim: bool = False
+    victim_training_seed_count: int = 0
+    matched_baseline_comparison_completed: bool = False
+    sumo_evidence: bool = False
+    p5_authorized: bool = False
+    preparation_contract_sha256: str | None = None
+    protocol_sha256: str | None = None
+
+
+@dataclass(frozen=True)
 class P4AuditConfig:
     schema_version: str
     name: str
@@ -242,6 +283,7 @@ class P4AuditConfig:
     attack: AttackSpec
     fairness: FairnessSpec
     evidence_scope: EvidenceScope
+    claim_context: ClaimContext
 
     def to_dict(self) -> dict[str, Any]:
         payload = dataclasses.asdict(self)
@@ -720,12 +762,143 @@ def _parse_temporal_budget(value: Any) -> TemporalBudgetSpec:
     )
 
 
+def _validate_claim_context(value: ClaimContext) -> ClaimContext:
+    """Validate claim semantics at every parser and execution boundary."""
+
+    if type(value) is not ClaimContext:
+        raise TypeError("claim_context must be an exact ClaimContext")
+
+    def optional_sha(candidate: str | None, *, field: str) -> str | None:
+        if candidate is None:
+            return None
+        normalized = validate_sha256(candidate, name=f"claim_context.{field}")
+        if normalized != candidate:
+            raise ValueError(f"claim_context.{field} must be canonical lowercase hex")
+        return normalized
+
+    result = ClaimContext(
+        claim_tier=_string(value.claim_tier, "claim_context.claim_tier"),
+        task_scope=_string(value.task_scope, "claim_context.task_scope"),
+        formal_statistical_claim=_strict_bool(
+            value.formal_statistical_claim,
+            "claim_context.formal_statistical_claim",
+        ),
+        victim_training_seed_count=_integer(
+            value.victim_training_seed_count,
+            "claim_context.victim_training_seed_count",
+        ),
+        matched_baseline_comparison_completed=_strict_bool(
+            value.matched_baseline_comparison_completed,
+            "claim_context.matched_baseline_comparison_completed",
+        ),
+        sumo_evidence=_strict_bool(
+            value.sumo_evidence,
+            "claim_context.sumo_evidence",
+        ),
+        p5_authorized=_strict_bool(
+            value.p5_authorized,
+            "claim_context.p5_authorized",
+        ),
+        preparation_contract_sha256=optional_sha(
+            value.preparation_contract_sha256,
+            field="preparation_contract_sha256",
+        ),
+        protocol_sha256=optional_sha(
+            value.protocol_sha256,
+            field="protocol_sha256",
+        ),
+    )
+    if result.claim_tier not in {"unspecified", "screening"}:
+        raise ValueError("claim_context.claim_tier is unsupported by P4 v1")
+    if result.task_scope not in {"unspecified", "synthetic_repository_owned"}:
+        raise ValueError("claim_context.task_scope is unsupported by P4 v1")
+    if (
+        result.formal_statistical_claim
+        or result.sumo_evidence
+        or result.p5_authorized
+    ):
+        raise ValueError(
+            "P4 v1 claim_context cannot assert formal, SUMO, or P5 evidence"
+        )
+    if result.claim_tier == "unspecified":
+        if result != ClaimContext():
+            raise ValueError(
+                "an unspecified claim_context must retain every conservative default"
+            )
+    elif (
+        result.task_scope != "synthetic_repository_owned"
+        or result.victim_training_seed_count != 1
+        or result.matched_baseline_comparison_completed
+        or result.preparation_contract_sha256 is None
+        or result.protocol_sha256 is None
+    ):
+        raise ValueError(
+            "screening claim_context must bind one victim seed, the synthetic "
+            "task, no matched baseline, and exact preparation/protocol hashes"
+        )
+    return result
+
+
+def _parse_claim_context(value: Any | None) -> ClaimContext:
+    if value is None:
+        return _validate_claim_context(ClaimContext())
+    raw = _mapping(value, "claim_context")
+    keys = {
+        "claim_tier",
+        "task_scope",
+        "formal_statistical_claim",
+        "victim_training_seed_count",
+        "matched_baseline_comparison_completed",
+        "sumo_evidence",
+        "p5_authorized",
+        "preparation_contract_sha256",
+        "protocol_sha256",
+    }
+    _strict_keys(raw, allowed=keys, required=keys, location="claim_context")
+
+    def optional_sha(field: str) -> str | None:
+        candidate = raw[field]
+        if candidate is None:
+            return None
+        return validate_sha256(candidate, name=f"claim_context.{field}")
+
+    result = ClaimContext(
+        claim_tier=_string(raw["claim_tier"], "claim_context.claim_tier"),
+        task_scope=_string(raw["task_scope"], "claim_context.task_scope"),
+        formal_statistical_claim=_strict_bool(
+            raw["formal_statistical_claim"],
+            "claim_context.formal_statistical_claim",
+        ),
+        victim_training_seed_count=_integer(
+            raw["victim_training_seed_count"],
+            "claim_context.victim_training_seed_count",
+        ),
+        matched_baseline_comparison_completed=_strict_bool(
+            raw["matched_baseline_comparison_completed"],
+            "claim_context.matched_baseline_comparison_completed",
+        ),
+        sumo_evidence=_strict_bool(
+            raw["sumo_evidence"],
+            "claim_context.sumo_evidence",
+        ),
+        p5_authorized=_strict_bool(
+            raw["p5_authorized"],
+            "claim_context.p5_authorized",
+        ),
+        preparation_contract_sha256=optional_sha(
+            "preparation_contract_sha256"
+        ),
+        protocol_sha256=optional_sha("protocol_sha256"),
+    )
+    return _validate_claim_context(result)
+
+
 def load_p4_audit_config(path: str | Path) -> P4AuditConfig:
     """Load the closed P4 STFA audit v1 YAML schema."""
 
     config_path = Path(path).expanduser().resolve()
     raw = _mapping(_strict_yaml_load(config_path), str(config_path))
-    top_keys = {
+    required_top_keys = {
         "schema_version",
         "name",
         "environment",
@@ -738,7 +911,12 @@ def load_p4_audit_config(path: str | Path) -> P4AuditConfig:
         "fairness",
         "evidence_scope",
     }
-    _strict_keys(raw, allowed=top_keys, required=top_keys, location="config")
+    _strict_keys(
+        raw,
+        allowed={*required_top_keys, "claim_context"},
+        required=required_top_keys,
+        location="config",
+    )
     if raw["schema_version"] != P4_AUDIT_SCHEMA_VERSION:
         raise ValueError(f"schema_version must be {P4_AUDIT_SCHEMA_VERSION}")
 
@@ -885,6 +1063,7 @@ def load_p4_audit_config(path: str | Path) -> P4AuditConfig:
     if environment_registry not in {
         P4_GENERIC_ENVIRONMENT_REGISTRY,
         P4_HIGHWAY_ENVIRONMENT_REGISTRY,
+        P4_MERGELITE_ENVIRONMENT_REGISTRY,
         P4_SUMO_ENVIRONMENT_REGISTRY,
     }:
         raise ValueError("environment.registry_key is not in the P4 registry")
@@ -913,10 +1092,35 @@ def load_p4_audit_config(path: str | Path) -> P4AuditConfig:
             "highway_fast_v0_audited_v1 requires its exact registered id, "
             "factory, and runtime type"
         )
+    if environment_registry == P4_MERGELITE_ENVIRONMENT_REGISTRY:
+        canonical_factorization = mergelite9_factorization()
+        if (
+            environment_id != MERGELITE9_ENVIRONMENT_ID
+            or environment_factory != P4_MERGELITE_ENVIRONMENT_FACTORY
+            or runtime_type != P4_MERGELITE_ENVIRONMENT_TYPE
+            or max_episode_steps != MERGELITE9_MAX_EPISODE_STEPS
+            or factorization.contract_hash != canonical_factorization.contract_hash
+            or observation_shape != MERGELITE9_OBSERVATION_SHAPE
+            or observation_dtype != "float32"
+            or not np.array_equal(observation_low, MERGELITE9_OBSERVATION_LOW)
+            or not np.array_equal(observation_high, MERGELITE9_OBSERVATION_HIGH)
+        ):
+            raise ValueError(
+                "mergelite9_v1 requires its exact registered id, factory, "
+                "runtime type, 64-step horizon, spaces, and action factorization"
+            )
     normalization_contract = validate_sha256(
         environment_raw["normalization_contract_sha256"],
         name="environment.normalization_contract_sha256",
     )
+    if (
+        environment_registry == P4_MERGELITE_ENVIRONMENT_REGISTRY
+        and normalization_contract
+        != MERGELITE9_NORMALIZATION_CONTRACT_SHA256
+    ):
+        raise ValueError(
+            "mergelite9_v1 normalization contract SHA-256 differs from the registry"
+        )
     raw_assets = environment_raw["scenario_assets"]
     if not isinstance(raw_assets, list):
         raise ValueError("environment.scenario_assets must be a list")
@@ -970,6 +1174,11 @@ def load_p4_audit_config(path: str | Path) -> P4AuditConfig:
             "highway_fast_v0_audited_v1 requires exactly one "
             "runtime_manifest scenario asset"
         )
+    if (
+        environment_registry == P4_MERGELITE_ENVIRONMENT_REGISTRY
+        and scenario_assets
+    ):
+        raise ValueError("mergelite9_v1 does not accept external scenario assets")
     expected_environment_contract = environment_contract_sha256(
         environment_id=environment_id,
         max_episode_steps=max_episode_steps,
@@ -1115,6 +1324,31 @@ def load_p4_audit_config(path: str | Path) -> P4AuditConfig:
         raise ValueError(
             "semantic_projector.guarantee must explicitly limit claims to policy input"
         )
+    mergelite_projector_binding = (
+        projector.name == MERGELITE9_PROJECTOR_NAME
+        and projector.version == MERGELITE9_PROJECTOR_VERSION
+        and projector.factory == P4_MERGELITE_PROJECTOR_FACTORY
+        and projector.factory_kwargs == {}
+        and projector.observation_shape == MERGELITE9_OBSERVATION_SHAPE
+    )
+    if (
+        environment.registry_key == P4_MERGELITE_ENVIRONMENT_REGISTRY
+        and not mergelite_projector_binding
+    ):
+        raise ValueError(
+            "mergelite9_v1 requires its exact dedicated semantic sensor projector"
+        )
+    if (
+        environment.registry_key != P4_MERGELITE_ENVIRONMENT_REGISTRY
+        and (
+            projector.factory == P4_MERGELITE_PROJECTOR_FACTORY
+            or projector.name == MERGELITE9_PROJECTOR_NAME
+            or projector.version == MERGELITE9_PROJECTOR_VERSION
+        )
+    ):
+        raise ValueError(
+            "the MergeLite9 semantic sensor projector is registry-bound"
+        )
 
     safety_raw = _mapping(raw["safety"], "safety")
     _strict_keys(
@@ -1129,6 +1363,14 @@ def load_p4_audit_config(path: str | Path) -> P4AuditConfig:
             name="safety.cost_definition_sha256",
         )
     )
+    if (
+        environment.registry_key == P4_MERGELITE_ENVIRONMENT_REGISTRY
+        and safety.cost_definition_sha256
+        != MERGELITE9_SAFETY_COST_DEFINITION_SHA256
+    ):
+        raise ValueError(
+            "mergelite9_v1 safety cost definition SHA-256 differs from the registry"
+        )
 
     artifacts_raw = _mapping(raw["artifacts"], "artifacts")
     _strict_keys(
@@ -1401,6 +1643,15 @@ def load_p4_audit_config(path: str | Path) -> P4AuditConfig:
         raise ValueError(
             "P4 cannot claim SUMO empirical effectiveness before a stable SUMO victim"
         )
+    claim_context = _parse_claim_context(raw.get("claim_context"))
+    if (
+        claim_context.claim_tier == "screening"
+        and environment.registry_key != P4_MERGELITE_ENVIRONMENT_REGISTRY
+    ):
+        raise ValueError(
+            "the current synthetic_repository_owned screening claim is "
+            "registry-bound to mergelite9_v1"
+        )
 
     return P4AuditConfig(
         schema_version=P4_AUDIT_SCHEMA_VERSION,
@@ -1416,6 +1667,7 @@ def load_p4_audit_config(path: str | Path) -> P4AuditConfig:
         attack=attack,
         fairness=fairness,
         evidence_scope=evidence,
+        claim_context=claim_context,
     )
 
 
@@ -1446,6 +1698,10 @@ def _make_default_env(config: P4AuditConfig) -> gym.Env:
         from rl_attack.envs.highway_runtime import make_highway_fast_v0_audited
 
         return make_highway_fast_v0_audited(
+            max_episode_steps=config.environment.max_episode_steps,
+        )
+    if config.environment.registry_key == P4_MERGELITE_ENVIRONMENT_REGISTRY:
+        return make_mergelite9(
             max_episode_steps=config.environment.max_episode_steps,
         )
     if config.environment.registry_key == P4_SUMO_ENVIRONMENT_REGISTRY:
@@ -1551,6 +1807,81 @@ def build_policy_input_projector(context: ProjectorBuildContext) -> Projector:
         mutable_mask=raw["mutable_mask"],
         name=_string(raw["name"], "projector config.name"),
     )
+
+
+def build_mergelite9_projector(
+    context: ProjectorBuildContext,
+) -> Projector:
+    """Build only the registry-bound MergeLite9 sensor projector."""
+
+    if (
+        context.config.environment.registry_key
+        != P4_MERGELITE_ENVIRONMENT_REGISTRY
+        or context.config.projector.factory != P4_MERGELITE_PROJECTOR_FACTORY
+        or context.config.projector.name != MERGELITE9_PROJECTOR_NAME
+        or context.config.projector.version != MERGELITE9_PROJECTOR_VERSION
+        or context.config.projector.factory_kwargs
+        or context.config.projector.observation_shape
+        != MERGELITE9_OBSERVATION_SHAPE
+    ):
+        raise ValueError(
+            "MergeLite9 projector factory is outside its exact registry entry"
+        )
+    raw = _mapping(
+        _strict_yaml_load(context.config_path),
+        "MergeLite9 projector config",
+    )
+    keys = {
+        "schema_version",
+        "name",
+        "contract_version",
+        "observation_shape",
+        "epsilon_ratio",
+        "sensor_contract",
+        "policy_input_epsilon",
+    }
+    _strict_keys(
+        raw,
+        allowed=keys,
+        required=keys,
+        location="MergeLite9 projector config",
+    )
+    if (
+        raw["schema_version"] != MERGELITE9_PROJECTOR_CONFIG_SCHEMA
+        or raw["name"] != MERGELITE9_PROJECTOR_NAME
+        or raw["contract_version"] != MERGELITE9_PROJECTOR_VERSION
+        or _shape(
+            raw["observation_shape"],
+            "MergeLite9 projector config.observation_shape",
+        )
+        != MERGELITE9_OBSERVATION_SHAPE
+    ):
+        raise ValueError("unsupported MergeLite9 projector configuration")
+    sensor_contract = _mapping(
+        raw["sensor_contract"],
+        "MergeLite9 projector config.sensor_contract",
+    )
+    sensor_payload = dict(sensor_contract)
+    sensor_sha = sensor_payload.pop("sha256", None)
+    if (
+        sensor_sha != MERGELITE9_SENSOR_ATTACK_CONTRACT_SHA256
+        or canonical_json_sha256(sensor_payload)
+        != MERGELITE9_SENSOR_ATTACK_CONTRACT_SHA256
+        or sensor_contract != MERGELITE9_SENSOR_ATTACK_CONTRACT
+    ):
+        raise ValueError("MergeLite9 trusted sensor attack contract differs")
+    epsilon_ratio = raw["epsilon_ratio"]
+    expected_epsilon = mergelite9_feature_epsilon(epsilon_ratio)
+    configured_epsilon = _finite_array(
+        raw["policy_input_epsilon"],
+        shape=MERGELITE9_OBSERVATION_SHAPE,
+        location="MergeLite9 projector config.policy_input_epsilon",
+    ).astype(np.float32)
+    if not np.array_equal(configured_epsilon, expected_epsilon):
+        raise ValueError(
+            "MergeLite9 policy input epsilon differs from base*ratio"
+        )
+    return MergeLite9Projector(epsilon_ratio=float(epsilon_ratio))
 
 
 def build_sumo_merge_v1_projector(
@@ -2153,6 +2484,71 @@ def _step_environment(
     return array, numeric_reward, bool(terminated), bool(truncated), dict(info)
 
 
+_MERGELITE_AUDIT_INFO_FIELDS = (
+    "safety_cost",
+    "collision",
+    "near_miss",
+    "merge_success",
+)
+
+
+def _new_environment_metrics(config: P4AuditConfig) -> dict[str, Any] | None:
+    if config.environment.registry_key != P4_MERGELITE_ENVIRONMENT_REGISTRY:
+        return None
+    return {
+        "safety_cost_aggregation": "sum_steps",
+        "event_aggregation": "any_step",
+        "safety_cost_definition_sha256": config.safety.cost_definition_sha256,
+        "safety_cost": 0.0,
+        "collision": False,
+        "near_miss": False,
+        "merge_success": False,
+    }
+
+
+def _accumulate_environment_metrics(
+    accumulator: dict[str, Any] | None,
+    info: Mapping[str, Any],
+) -> None:
+    if accumulator is None:
+        return
+    required = {*_MERGELITE_AUDIT_INFO_FIELDS, "safety_cost_definition_sha256"}
+    missing = required - set(info)
+    if missing:
+        raise InvalidP4Audit(
+            f"MergeLite9 environment info is missing {sorted(missing)!r}",
+            code="environment_info_invalid",
+        )
+    safety_cost = info["safety_cost"]
+    if (
+        isinstance(safety_cost, bool)
+        or not isinstance(safety_cost, (int, float, np.integer, np.floating))
+        or not math.isfinite(float(safety_cost))
+        or float(safety_cost) < 0.0
+    ):
+        raise InvalidP4Audit(
+            "MergeLite9 info safety_cost must be finite and non-negative",
+            code="environment_info_invalid",
+        )
+    if (
+        info["safety_cost_definition_sha256"]
+        != accumulator["safety_cost_definition_sha256"]
+    ):
+        raise InvalidP4Audit(
+            "MergeLite9 runtime safety cost definition SHA-256 drifted",
+            code="environment_info_invalid",
+        )
+    accumulator["safety_cost"] += float(safety_cost)
+    for field in ("collision", "near_miss", "merge_success"):
+        value = info[field]
+        if type(value) is not bool:
+            raise InvalidP4Audit(
+                f"MergeLite9 info {field} must be bool",
+                code="environment_info_invalid",
+            )
+        accumulator[field] = bool(accumulator[field] or value)
+
+
 def _run_clean_episode(
     *,
     policy: SB3CategoricalPolicyAdapter,
@@ -2167,6 +2563,7 @@ def _run_clean_episode(
     truncated = False
     audit_time_limit = False
     actions: list[int] = []
+    environment_metrics = _new_environment_metrics(config)
     try:
         observation, _ = _reset_observation(env, episode_seed)
         while not (terminated or truncated):
@@ -2176,10 +2573,11 @@ def _run_clean_episode(
                 n_actions=config.factorization.n_actions,
             )
             action = _argmax_action(scores, config.factorization.availability)
-            observation, reward, terminated, truncated, _ = _step_environment(
+            observation, reward, terminated, truncated, info = _step_environment(
                 env,
                 action,
             )
+            _accumulate_environment_metrics(environment_metrics, info)
             total_return += reward
             actions.append(action)
             length += 1
@@ -2188,7 +2586,7 @@ def _run_clean_episode(
             ):
                 audit_time_limit = True
                 truncated = True
-        return {
+        record = {
             "episode_seed": episode_seed,
             "episode_return": total_return,
             "episode_length": length,
@@ -2198,6 +2596,9 @@ def _run_clean_episode(
             "actions": actions,
             "victim_action_mode": P4_ARGMAX_MODE,
         }
+        if environment_metrics is not None:
+            record["environment_metrics"] = environment_metrics
+        return record
     finally:
         env.close()
 
@@ -2497,6 +2898,7 @@ def _run_attacked_episode(
     truncated = False
     audit_time_limit = False
     step_records: list[dict[str, Any]] = []
+    environment_metrics = _new_environment_metrics(config)
     totals = {
         "steps": 0,
         "selected": 0,
@@ -2693,6 +3095,7 @@ def _run_attacked_episode(
                     "audit_time_limit": True,
                     "TimeLimit.truncated": True,
                 }
+            _accumulate_environment_metrics(environment_metrics, info)
             _optional_transition_callback(
                 attack,
                 observation=clean,
@@ -2714,7 +3117,7 @@ def _run_attacked_episode(
             callback(episode_return=total_return, length=length)
         if totals["selected"] > config.attack.temporal_budget.k:
             raise AssertionError("independent temporal ledger allowed more than K selections")
-        return {
+        record = {
             "episode_seed": episode_seed,
             "episode_return": total_return,
             "episode_length": length,
@@ -2734,6 +3137,9 @@ def _run_attacked_episode(
             "accounting": totals,
             "steps": step_records,
         }
+        if environment_metrics is not None:
+            record["environment_metrics"] = environment_metrics
+        return record
     finally:
         env.close()
 
@@ -2769,7 +3175,7 @@ def _summarize(
     selected = totals["selected"]
     target_declared = totals["target_declared"]
     steps = totals["steps"]
-    return {
+    result = {
         "episodes": len(seeds),
         "episode_seeds": seeds,
         "mean_clean_return": float(
@@ -2794,6 +3200,91 @@ def _summarize(
             ),
         },
     }
+    metric_presence = [
+        "environment_metrics" in record
+        for record in (*clean_records, *attacked_records)
+    ]
+    if any(metric_presence):
+        if not all(metric_presence):
+            raise RuntimeError(
+                "paired environment metric records are incomplete"
+            )
+
+        def aggregate(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+            metrics = [
+                _mapping(record["environment_metrics"], "environment_metrics")
+                for record in records
+            ]
+            if any(
+                item.get("safety_cost_aggregation") != "sum_steps"
+                or item.get("event_aggregation") != "any_step"
+                for item in metrics
+            ):
+                raise RuntimeError("environment metric aggregation contract drifted")
+            cost_hashes = {
+                item.get("safety_cost_definition_sha256") for item in metrics
+            }
+            if len(cost_hashes) != 1:
+                raise RuntimeError("environment safety cost definition drifted")
+            for item in metrics:
+                cost = item.get("safety_cost")
+                if (
+                    isinstance(cost, bool)
+                    or not isinstance(cost, (int, float))
+                    or not math.isfinite(float(cost))
+                    or float(cost) < 0.0
+                ):
+                    raise RuntimeError("environment safety cost record is invalid")
+                if any(
+                    type(item.get(field)) is not bool
+                    for field in ("collision", "near_miss", "merge_success")
+                ):
+                    raise RuntimeError("environment event record is invalid")
+            return {
+                "safety_cost": float(
+                    sum(float(item["safety_cost"]) for item in metrics)
+                ),
+                "collision": sum(int(bool(item["collision"])) for item in metrics),
+                "near_miss": sum(int(bool(item["near_miss"])) for item in metrics),
+                "merge_success": sum(
+                    int(bool(item["merge_success"])) for item in metrics
+                ),
+            }
+
+        clean_metrics = aggregate(clean_records)
+        attacked_metrics = aggregate(attacked_records)
+        result["environment_metrics"] = {
+            "safety_cost_aggregation": "sum_steps_then_sum_episodes",
+            "event_aggregation": "any_step_then_count_episodes",
+            "event_rate_denominator": len(seeds),
+            "clean": clean_metrics,
+            "attacked": attacked_metrics,
+            "paired_attacked_minus_clean": {
+                key: float(attacked_metrics[key]) - float(clean_metrics[key])
+                for key in _MERGELITE_AUDIT_INFO_FIELDS
+            },
+            "mean_per_episode": {
+                "clean": {
+                    key: float(clean_metrics[key]) / len(seeds)
+                    for key in _MERGELITE_AUDIT_INFO_FIELDS
+                },
+                "attacked": {
+                    key: float(attacked_metrics[key]) / len(seeds)
+                    for key in _MERGELITE_AUDIT_INFO_FIELDS
+                },
+            },
+            "event_rates": {
+                "clean": {
+                    key: float(clean_metrics[key]) / len(seeds)
+                    for key in ("collision", "near_miss", "merge_success")
+                },
+                "attacked": {
+                    key: float(attacked_metrics[key]) / len(seeds)
+                    for key in ("collision", "near_miss", "merge_success")
+                },
+            },
+        }
+    return result
 
 
 def _integration_accounting(summary: Mapping[str, Any]) -> dict[str, Any]:
@@ -2813,6 +3304,59 @@ def _integration_accounting(summary: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _torch_thread_counts() -> tuple[int, int]:
+    intraop = int(torch.get_num_threads())
+    interop = int(torch.get_num_interop_threads())
+    if intraop < 1 or interop < 1:
+        raise RuntimeError("Torch thread getters must return positive integers")
+    return intraop, interop
+
+
+def _configure_torch_threads(torch_threads: int | None) -> None:
+    if torch_threads is None:
+        _torch_thread_counts()
+        return
+    if isinstance(torch_threads, bool) or not isinstance(torch_threads, int):
+        raise TypeError("torch_threads must be an integer or None")
+    if torch_threads < 1:
+        raise ValueError("torch_threads must be positive")
+    os.environ["OMP_NUM_THREADS"] = str(torch_threads)
+    os.environ["MKL_NUM_THREADS"] = str(torch_threads)
+    torch.set_num_threads(torch_threads)
+    try:
+        torch.set_num_interop_threads(1)
+    except RuntimeError as exc:
+        if int(torch.get_num_interop_threads()) != 1:
+            raise RuntimeError(
+                "Torch inter-op threads could not be fixed to one"
+            ) from exc
+    intraop, interop = _torch_thread_counts()
+    if intraop != torch_threads or interop != 1:
+        raise RuntimeError("Torch thread getters do not match the requested contract")
+
+
+def _execution_record(device: str | torch.device) -> dict[str, Any]:
+    resolved_device = str(torch.device(device))
+    intraop, interop = _torch_thread_counts()
+    return {
+        "device": resolved_device,
+        "torch_num_threads": intraop,
+        "torch_num_interop_threads": interop,
+    }
+
+
+def _assert_execution_record(record: Mapping[str, Any]) -> None:
+    if set(record) != {
+        "device",
+        "torch_num_threads",
+        "torch_num_interop_threads",
+    }:
+        raise RuntimeError("P4 execution resource record fields are not exact")
+    current = _execution_record(_string(record["device"], "execution.device"))
+    if current != dict(record):
+        raise RuntimeError("Torch execution resources changed during the P4 audit")
+
+
 def _repository_provenance() -> dict[str, Any]:
     try:
         from importlib.metadata import version
@@ -2823,12 +3367,156 @@ def _repository_provenance() -> dict[str, Any]:
         }
     except Exception:
         versions = {}
+    candidate_root = Path(__file__).resolve().parents[3]
+
+    def git(root: Path, *args: str) -> str:
+        result = subprocess.run(
+            ["git", "-C", str(root), *args],
+            check=True,
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10.0,
+        )
+        return result.stdout.strip()
+
+    try:
+        root_text = git(candidate_root, "rev-parse", "--show-toplevel")
+        if not root_text:
+            raise ValueError("git returned an empty repository root")
+        repository_root = Path(root_text).expanduser().resolve(strict=True)
+        git_commit = git(repository_root, "rev-parse", "HEAD")
+        if (
+            len(git_commit) != 40
+            or git_commit != git_commit.lower()
+            or any(character not in "0123456789abcdef" for character in git_commit)
+        ):
+            raise ValueError("git returned a non-canonical commit hash")
+        git_status_lines = sorted(
+            git(
+                repository_root,
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=all",
+            ).splitlines()
+        )
+        git_fields: dict[str, Any] = {
+            "repository_root": str(repository_root),
+            "git_commit": git_commit,
+            "git_dirty": bool(git_status_lines),
+            "git_status_lines": git_status_lines,
+            "git_status": "available",
+            "git_error": None,
+        }
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        message = " ".join(str(exc).split())
+        git_fields = {
+            "repository_root": None,
+            "git_commit": None,
+            "git_dirty": None,
+            "git_status_lines": [],
+            "git_status": "unavailable",
+            "git_error": f"{type(exc).__name__}: {message}"[:512],
+        }
+    intraop, interop = _torch_thread_counts()
     return {
         "python_implementation": __import__("platform").python_implementation(),
         "python_version": __import__("platform").python_version(),
         "platform": __import__("platform").platform(),
         "packages": versions,
+        "torch_num_threads": intraop,
+        "torch_num_interop_threads": interop,
+        **git_fields,
     }
+
+
+def _assert_source_config_pinned(
+    config: P4AuditConfig,
+    *,
+    stage: str,
+) -> None:
+    expected = validate_sha256(
+        config.config_sha256,
+        name="P4AuditConfig.config_sha256",
+    )
+    if not config.config_path.is_file():
+        raise FileNotFoundError(
+            f"source config does not exist during {stage}: {config.config_path}"
+        )
+    if sha256_file(config.config_path) != expected:
+        raise ValueError(f"source config SHA-256 mismatch during {stage}")
+
+
+def _revalidate_config_against_source(
+    config: P4AuditConfig,
+    *,
+    stage: str,
+) -> P4AuditConfig:
+    """Reload a direct config and reject every parser-bypassing replacement."""
+
+    if type(config) is not P4AuditConfig:
+        raise TypeError("config must be an exact P4AuditConfig")
+    _validate_claim_context(config.claim_context)
+    _assert_source_config_pinned(config, stage=stage)
+    reloaded = load_p4_audit_config(config.config_path)
+    if canonical_json_sha256(reloaded.to_dict()) != canonical_json_sha256(
+        config.to_dict()
+    ):
+        raise ValueError(
+            "direct P4AuditConfig differs from its freshly parsed source config"
+        )
+    return reloaded
+
+
+def _pinned_input_records(
+    config: P4AuditConfig,
+) -> tuple[tuple[Path, str, str], ...]:
+    records: list[tuple[Path, str, str]] = [
+        (config.config_path, config.config_sha256, "source config"),
+        (
+            config.victim.checkpoint,
+            config.victim.checkpoint_sha256,
+            "victim checkpoint",
+        ),
+        (
+            config.projector.config,
+            config.projector.config_sha256,
+            "semantic projector config",
+        ),
+    ]
+    records.extend(
+        (asset.path, asset.sha256, f"scenario asset {asset.role}")
+        for asset in config.environment.scenario_assets
+    )
+    for role, artifact in config.artifacts.items():
+        records.extend(
+            (
+                (
+                    artifact.checkpoint,
+                    artifact.checkpoint_sha256,
+                    f"{role} checkpoint",
+                ),
+                (
+                    artifact.manifest,
+                    artifact.manifest_sha256,
+                    f"{role} manifest",
+                ),
+            )
+        )
+    return tuple(records)
+
+
+def _assert_pinned_inputs_unchanged(
+    config: P4AuditConfig,
+    *,
+    stage: str,
+) -> None:
+    for path, expected, label in _pinned_input_records(config):
+        expected = validate_sha256(expected, name=f"{label} SHA-256")
+        if not path.is_file():
+            raise FileNotFoundError(f"{label} does not exist during {stage}: {path}")
+        if sha256_file(path) != expected:
+            raise ValueError(f"{label} SHA-256 mismatch during {stage}")
 
 
 def _preflight_output(
@@ -2961,6 +3649,7 @@ def _execute_p4_audit(
     config: P4AuditConfig,
     *,
     device: str,
+    execution: Mapping[str, Any],
     victim_loader: VictimLoader | None,
     environment_factory: EnvironmentFactory | None,
     projector_factory: ProjectorFactory | None,
@@ -2968,6 +3657,11 @@ def _execute_p4_audit(
     attack_factory: AttackFactory | None,
     injected_dependencies: Sequence[str],
 ) -> tuple[dict[str, Any], dict[str, Any]]:
+    config = _revalidate_config_against_source(
+        config,
+        stage="execution preflight",
+    )
+    _assert_pinned_inputs_unchanged(config, stage="execution preflight")
     # Recheck the scientific timing boundary at execution time so a caller
     # cannot bypass the YAML parser by constructing P4AuditConfig directly.
     runtime_timing = config.attack.factory_kwargs.get("timing_mode", "director")
@@ -2994,27 +3688,6 @@ def _execute_p4_audit(
             "P4 execution cannot claim formal SUMO contract integration before "
             "the production SUMO constructor is registry-closed"
         )
-    for path, expected, label in (
-        (
-            config.victim.checkpoint,
-            config.victim.checkpoint_sha256,
-            "victim checkpoint",
-        ),
-        (
-            config.projector.config,
-            config.projector.config_sha256,
-            "semantic projector config",
-        ),
-        *tuple(
-            (asset.path, asset.sha256, f"scenario asset {asset.role}")
-            for asset in config.environment.scenario_assets
-        ),
-    ):
-        if not path.is_file():
-            raise FileNotFoundError(f"{label} does not exist: {path}")
-        if sha256_file(path) != expected:
-            raise ValueError(f"{label} SHA-256 mismatch")
-
     if config.environment.registry_key == P4_HIGHWAY_ENVIRONMENT_REGISTRY:
         from rl_attack.envs.highway_manifest import (
             find_git_repository_root,
@@ -3138,6 +3811,8 @@ def _execute_p4_audit(
         or frozen_after["any_parameter_requires_grad"]
     ):
         raise RuntimeError("victim lost its frozen/evaluation invariant")
+    _assert_pinned_inputs_unchanged(config, stage="execution completion")
+    _assert_execution_record(execution)
 
     files: dict[str, Any] = {
         "resolved_config.json": config.to_dict(),
@@ -3151,6 +3826,10 @@ def _execute_p4_audit(
     else:
         files["summaries.json"] = {
             "robust_summary_eligible": True,
+            "robust_summary_eligibility_meaning": (
+                "bundle_integrity_only_not_formal_robustness"
+            ),
+            "claim_context": _jsonable(config.claim_context),
             **summary,
         }
     manifest = {
@@ -3158,6 +3837,11 @@ def _execute_p4_audit(
         "status": "complete",
         "test_scope": test_scope,
         "robust_summary_eligible": not test_scope,
+        "robust_summary_eligibility_meaning": (
+            "bundle_integrity_only_not_formal_robustness"
+        ),
+        "claim_context": _jsonable(config.claim_context),
+        "execution": dict(execution),
         "dependency_injection": list(injected_dependencies),
         "audit": {
             "name": config.name,
@@ -3269,6 +3953,10 @@ def _execute_p4_audit(
     else:
         manifest["summary"] = {
             "robust_summary_eligible": True,
+            "robust_summary_eligibility_meaning": (
+                "bundle_integrity_only_not_formal_robustness"
+            ),
+            "claim_context": _jsonable(config.claim_context),
             **summary,
         }
     return files, manifest
@@ -3279,6 +3967,7 @@ def run_p4_audit(
     *,
     output_directory: str | Path,
     device: str = "cpu",
+    torch_threads: int | None = None,
     overwrite: bool = False,
     victim_loader: VictimLoader | None = None,
     environment_factory: EnvironmentFactory | None = None,
@@ -3288,10 +3977,14 @@ def run_p4_audit(
 ) -> dict[str, Any]:
     """Run P4 and atomically publish a complete or explicit invalid bundle."""
 
-    resolved = (
-        config
-        if isinstance(config, P4AuditConfig)
-        else load_p4_audit_config(config)
+    _configure_torch_threads(torch_threads)
+    execution = _execution_record(device)
+    initially_loaded = (
+        config if isinstance(config, P4AuditConfig) else load_p4_audit_config(config)
+    )
+    resolved = _revalidate_config_against_source(
+        initially_loaded,
+        stage="run preflight",
     )
     output = Path(output_directory)
     _preflight_output(
@@ -3313,7 +4006,8 @@ def run_p4_audit(
     try:
         files, manifest = _execute_p4_audit(
             resolved,
-            device=device,
+            device=execution["device"],
+            execution=execution,
             victim_loader=victim_loader,
             environment_factory=environment_factory,
             projector_factory=projector_factory,
@@ -3321,6 +4015,8 @@ def run_p4_audit(
             attack_factory=attack_factory,
             injected_dependencies=injected_dependencies,
         )
+        _assert_pinned_inputs_unchanged(resolved, stage="pre-publication")
+        _assert_execution_record(execution)
     except Exception as exc:
         if isinstance(exc, (FileExistsError, OutputAliasError)):
             raise
@@ -3330,6 +4026,11 @@ def run_p4_audit(
             "status": "invalid",
             "test_scope": bool(injected_dependencies),
             "robust_summary_eligible": False,
+            "robust_summary_eligibility_meaning": (
+                "bundle_integrity_only_not_formal_robustness"
+            ),
+            "claim_context": _jsonable(ClaimContext()),
+            "execution": _execution_record(execution["device"]),
             "dependency_injection": list(injected_dependencies),
             "invalid_reason": {
                 "code": invalid.code,

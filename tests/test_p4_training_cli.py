@@ -15,7 +15,12 @@ from rl_attack.attacks.strong.stfa.action_factors import (
     ActionFactorization,
 )
 from rl_attack.cli import stfa_training
-from rl_attack.core.artifacts import sha256_file, strict_json_load, strict_json_write
+from rl_attack.core.artifacts import (
+    canonical_json_sha256,
+    sha256_file,
+    strict_json_load,
+    strict_json_write,
+)
 from rl_attack.policies.sb3 import SB3CategoricalPolicyAdapter
 from rl_attack.training.stfa_pipeline import (
     CRITIC_DATASET_MANIFEST_SCHEMA,
@@ -27,9 +32,14 @@ from rl_attack.training.stfa_pipeline import (
     dataset_manifest_path,
     director_labeler_contract,
     load_critic_dataset,
+    load_director_dataset,
     load_frozen_victim,
+    train_critic_from_npz,
 )
-from rl_attack.training.stfa_safety_critic import load_stfa_safety_critic
+from rl_attack.training.stfa_safety_critic import (
+    STFASafetyCriticConfig,
+    load_stfa_safety_critic,
+)
 
 
 @pytest.fixture(scope="module")
@@ -388,6 +398,24 @@ def test_critic_and_director_cli_train_complete_pinned_bundles(
         critic_checkpoint=critic_checkpoint,
         critic_checkpoint_sha256=critic_sha,
     )
+    director_sidecar_payload = strict_json_load(dataset_manifest_path(director_dataset))
+    director_legacy_environment_sha256 = canonical_json_sha256(
+        director_sidecar_payload["environment"]
+    )
+    loaded_director = load_director_dataset(
+        director_dataset,
+        expected_sha256=director_data_sha,
+        expected_manifest_sha256=director_manifest_sha,
+        expected_action_ontology_sha256=_factorization().ontology_hash,
+    )
+    assert (
+        loaded_director.verified_runtime_environment_contract_sha256
+        == director_legacy_environment_sha256
+    )
+    assert (
+        loaded_director.runtime_environment_contract_verification_source
+        == "validated_dataset_environment"
+    )
     director_args = parser.parse_args(
         [
             "director",
@@ -428,6 +456,35 @@ def test_critic_and_director_cli_train_complete_pinned_bundles(
     assert director_run["dependencies"]["safety_critic"]["checkpoint_sha256"] == (critic_sha)
     assert director_run["validation"]["safety_costs_recomputed_from_pinned_critic"]
     assert director_run["training"]["random_untrained_artifact"] is False
+
+    declared_runtime_sha256 = "d" * 64
+    director_sidecar_payload["p4_runtime_environment_contract_sha256"] = (
+        declared_runtime_sha256
+    )
+    strict_json_write(dataset_manifest_path(director_dataset), director_sidecar_payload)
+    updated_manifest_sha256 = sha256_file(dataset_manifest_path(director_dataset))
+    with pytest.raises(ValueError, match="independently trusted expected"):
+        load_director_dataset(
+            director_dataset,
+            expected_sha256=director_data_sha,
+            expected_manifest_sha256=updated_manifest_sha256,
+            expected_action_ontology_sha256=_factorization().ontology_hash,
+        )
+    loaded_director = load_director_dataset(
+        director_dataset,
+        expected_sha256=director_data_sha,
+        expected_manifest_sha256=updated_manifest_sha256,
+        expected_action_ontology_sha256=_factorization().ontology_hash,
+        expected_runtime_environment_contract_sha256=declared_runtime_sha256,
+    )
+    assert (
+        loaded_director.verified_runtime_environment_contract_sha256
+        == declared_runtime_sha256
+    )
+    assert (
+        loaded_director.runtime_environment_contract_verification_source
+        == "trusted_expected_and_sidecar_declaration"
+    )
 
     # Python's strict parser hook proves neither run manifest serialized NaN or
     # Infinity constants.
@@ -525,5 +582,138 @@ def test_critic_dataset_missing_field_and_object_array_fail_closed(
             pickled,
             expected_sha256=sha256_file(pickled),
             expected_manifest_sha256=sha256_file(dataset_manifest_path(pickled)),
+            expected_action_ontology_sha256=_factorization().ontology_hash,
+        )
+
+
+def test_critic_runtime_environment_override_requires_trusted_expected(
+    tmp_path: Path,
+    victim_checkpoint: Path,
+) -> None:
+    dataset, data_sha, _, _ = _write_critic_dataset(tmp_path, victim_checkpoint)
+    sidecar_path = dataset_manifest_path(dataset)
+    sidecar = strict_json_load(sidecar_path)
+    runtime_contract_sha256 = "a" * 64
+    sidecar["p4_runtime_environment_contract_sha256"] = runtime_contract_sha256
+    strict_json_write(sidecar_path, sidecar)
+    manifest_sha = sha256_file(sidecar_path)
+
+    with pytest.raises(ValueError, match="independently trusted expected"):
+        load_critic_dataset(
+            dataset,
+            expected_sha256=data_sha,
+            expected_manifest_sha256=manifest_sha,
+            expected_action_ontology_sha256=_factorization().ontology_hash,
+        )
+
+    with pytest.raises(ValueError, match="does not match the trusted expected"):
+        load_critic_dataset(
+            dataset,
+            expected_sha256=data_sha,
+            expected_manifest_sha256=manifest_sha,
+            expected_action_ontology_sha256=_factorization().ontology_hash,
+            expected_runtime_environment_contract_sha256="b" * 64,
+        )
+
+    loaded = load_critic_dataset(
+        dataset,
+        expected_sha256=data_sha,
+        expected_manifest_sha256=manifest_sha,
+        expected_action_ontology_sha256=_factorization().ontology_hash,
+        expected_runtime_environment_contract_sha256=runtime_contract_sha256,
+    )
+    assert (
+        loaded.verified_runtime_environment_contract_sha256
+        == runtime_contract_sha256
+    )
+    assert (
+        loaded.runtime_environment_contract_verification_source
+        == "trusted_expected_and_sidecar_declaration"
+    )
+
+    run = train_critic_from_npz(
+        victim_checkpoint=victim_checkpoint,
+        expected_victim_checkpoint_sha256=sha256_file(victim_checkpoint),
+        dataset_path=dataset,
+        expected_dataset_sha256=data_sha,
+        expected_dataset_manifest_sha256=manifest_sha,
+        expected_action_ontology_sha256=_factorization().ontology_hash,
+        expected_runtime_environment_contract_sha256=runtime_contract_sha256,
+        output_dir=tmp_path / "outputs",
+        run_name="trusted-runtime-contract",
+        config=STFASafetyCriticConfig(
+            observation_shape=(4,),
+            n_actions=2,
+            hidden_sizes=(8,),
+            gradient_steps=2,
+            batch_size=4,
+            target_update_interval=1,
+        ),
+    )
+    assert (
+        run["training"]["method_manifest"]["dataset"]
+        ["environment_contract_sha256"]
+        == runtime_contract_sha256
+    )
+
+
+def test_critic_matching_legacy_environment_declaration_is_not_an_override(
+    tmp_path: Path,
+    victim_checkpoint: Path,
+) -> None:
+    dataset, data_sha, _, _ = _write_critic_dataset(tmp_path, victim_checkpoint)
+    sidecar_path = dataset_manifest_path(dataset)
+    sidecar = strict_json_load(sidecar_path)
+    legacy_sha256 = canonical_json_sha256(sidecar["environment"])
+    sidecar["p4_runtime_environment_contract_sha256"] = legacy_sha256
+    strict_json_write(sidecar_path, sidecar)
+
+    loaded = load_critic_dataset(
+        dataset,
+        expected_sha256=data_sha,
+        expected_manifest_sha256=sha256_file(sidecar_path),
+        expected_action_ontology_sha256=_factorization().ontology_hash,
+    )
+    assert loaded.verified_runtime_environment_contract_sha256 == legacy_sha256
+    assert (
+        loaded.runtime_environment_contract_verification_source
+        == "validated_dataset_environment_with_matching_declaration"
+    )
+
+
+def test_trusted_runtime_environment_requires_a_sidecar_declaration(
+    tmp_path: Path,
+    victim_checkpoint: Path,
+) -> None:
+    dataset, data_sha, manifest_sha, _ = _write_critic_dataset(
+        tmp_path, victim_checkpoint
+    )
+    sidecar = strict_json_load(dataset_manifest_path(dataset))
+    trusted_sha256 = canonical_json_sha256(sidecar["environment"])
+    with pytest.raises(ValueError, match="missing the runtime environment contract"):
+        load_critic_dataset(
+            dataset,
+            expected_sha256=data_sha,
+            expected_manifest_sha256=manifest_sha,
+            expected_action_ontology_sha256=_factorization().ontology_hash,
+            expected_runtime_environment_contract_sha256=trusted_sha256,
+        )
+
+
+def test_malformed_runtime_environment_declaration_fails_before_trust_resolution(
+    tmp_path: Path,
+    victim_checkpoint: Path,
+) -> None:
+    dataset, data_sha, _, _ = _write_critic_dataset(tmp_path, victim_checkpoint)
+    sidecar_path = dataset_manifest_path(dataset)
+    sidecar = strict_json_load(sidecar_path)
+
+    sidecar["p4_runtime_environment_contract_sha256"] = "not-a-sha"
+    strict_json_write(sidecar_path, sidecar)
+    with pytest.raises(ValueError, match="runtime environment contract SHA-256"):
+        load_critic_dataset(
+            dataset,
+            expected_sha256=data_sha,
+            expected_manifest_sha256=sha256_file(sidecar_path),
             expected_action_ontology_sha256=_factorization().ontology_hash,
         )

@@ -9,6 +9,16 @@ from pathlib import Path
 from rl_attack.experiments.p4_audit import InvalidP4Audit, run_p4_audit
 
 
+def _positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a positive integer") from exc
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run the paired, hard-K P4 STFA audit gate"
@@ -20,6 +30,12 @@ def _parser() -> argparse.ArgumentParser:
         default=Path("outputs") / "p4_stfa_audit",
     )
     parser.add_argument("--device", default="cpu")
+    parser.add_argument(
+        "--torch-threads",
+        type=_positive_int,
+        default=None,
+        help="fix Torch intra-op threads to this count and inter-op threads to 1",
+    )
     parser.add_argument("--overwrite", action="store_true")
     return parser
 
@@ -31,6 +47,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             args.config,
             output_directory=args.output_dir,
             device=args.device,
+            torch_threads=args.torch_threads,
             overwrite=args.overwrite,
         )
     except InvalidP4Audit as error:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -28,8 +29,10 @@ from rl_attack.attacks.strong.stfa.sumo_v1 import (
     SumoMergeV1DiscretePlanner,
     SumoPhysicalBudgetsV1,
 )
+from rl_attack.cli.p4_audit import _parser as p4_audit_cli_parser
 from rl_attack.experiments.p4_audit import (
     P4_AUDIT_SCHEMA_VERSION,
+    P4_MERGELITE_ENVIRONMENT_REGISTRY,
     P4_PROJECTOR_GUARANTEE,
     P4_RNG_DERIVATION,
     P4_SUMO_DISCRETE_PLANNER,
@@ -40,10 +43,16 @@ from rl_attack.experiments.p4_audit import (
     P4_SUMO_PROJECTOR_NAME,
     P4_SUMO_PROJECTOR_VERSION,
     AttackBuildContext,
+    ClaimContext,
     InvalidP4Audit,
     OutputAliasError,
     ProjectorBuildContext,
     ScenarioAssetSpec,
+    _configure_torch_threads,
+    _execution_record,
+    _parse_claim_context,
+    _repository_provenance,
+    _validate_claim_context,
     box_space_contract_sha256,
     build_stfa_attack,
     build_sumo_merge_v1_projector,
@@ -583,6 +592,21 @@ def test_real_sb3_nine_action_paired_hard_k_audit_distinguishes_target(
     assert manifest["status"] == "complete"
     assert manifest["test_scope"] is True
     assert manifest["robust_summary_eligible"] is False
+    assert manifest["robust_summary_eligibility_meaning"] == (
+        "bundle_integrity_only_not_formal_robustness"
+    )
+    assert manifest["claim_context"] == dataclasses.asdict(ClaimContext())
+    assert manifest["execution"] == {
+        "device": "cpu",
+        "torch_num_threads": torch.get_num_threads(),
+        "torch_num_interop_threads": torch.get_num_interop_threads(),
+    }
+    assert manifest["provenance"]["torch_num_threads"] == (
+        manifest["execution"]["torch_num_threads"]
+    )
+    assert manifest["provenance"]["torch_num_interop_threads"] == (
+        manifest["execution"]["torch_num_interop_threads"]
+    )
     assert manifest["dependency_injection"] == [
         "environment_factory",
         "artifact_loader",
@@ -700,6 +724,12 @@ def test_invalid_attack_metadata_publishes_no_robust_summary(tmp_path: Path) -> 
     }
     invalid = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
     assert invalid["invalid_reason"]["code"] == "attack_metadata_invalid"
+    assert invalid["claim_context"] == dataclasses.asdict(ClaimContext())
+    assert invalid["execution"] == {
+        "device": "cpu",
+        "torch_num_threads": torch.get_num_threads(),
+        "torch_num_interop_threads": torch.get_num_interop_threads(),
+    }
     assert "summary" not in invalid
 
 
@@ -747,6 +777,265 @@ def test_schema_rejects_attack_probability_and_duplicate_keys(tmp_path: Path) ->
     )
     with pytest.raises(ValueError, match="duplicate YAML"):
         load_p4_audit_config(duplicate)
+
+
+def test_claim_context_defaults_conservatively_and_screening_is_strict() -> None:
+    assert _parse_claim_context(None) == ClaimContext()
+    screening = {
+        "claim_tier": "screening",
+        "task_scope": "synthetic_repository_owned",
+        "formal_statistical_claim": False,
+        "victim_training_seed_count": 1,
+        "matched_baseline_comparison_completed": False,
+        "sumo_evidence": False,
+        "p5_authorized": False,
+        "preparation_contract_sha256": "a" * 64,
+        "protocol_sha256": "b" * 64,
+    }
+    parsed = _parse_claim_context(screening)
+    assert parsed.claim_tier == "screening"
+    assert parsed.formal_statistical_claim is False
+    assert parsed.matched_baseline_comparison_completed is False
+    assert parsed.sumo_evidence is False
+    assert parsed.p5_authorized is False
+
+    formal = dict(screening)
+    formal["formal_statistical_claim"] = True
+    with pytest.raises(ValueError, match="cannot assert formal"):
+        _parse_claim_context(formal)
+    unbound = dict(screening)
+    unbound["preparation_contract_sha256"] = None
+    with pytest.raises(ValueError, match="exact preparation/protocol hashes"):
+        _parse_claim_context(unbound)
+    unspecified = dict(screening)
+    unspecified.update(
+        {
+            "claim_tier": "unspecified",
+            "task_scope": "unspecified",
+            "victim_training_seed_count": 0,
+            "preparation_contract_sha256": None,
+            "protocol_sha256": None,
+        }
+    )
+    assert _parse_claim_context(unspecified) == ClaimContext()
+
+    with pytest.raises(ValueError, match="cannot assert formal"):
+        _validate_claim_context(
+            dataclasses.replace(ClaimContext(), formal_statistical_claim=True)
+        )
+
+
+def test_repository_provenance_has_exact_git_schema_and_unavailable_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected_keys = {
+        "python_implementation",
+        "python_version",
+        "platform",
+        "packages",
+        "repository_root",
+        "git_commit",
+        "git_dirty",
+        "git_status_lines",
+        "git_status",
+        "git_error",
+        "torch_num_threads",
+        "torch_num_interop_threads",
+    }
+    calls: list[list[str]] = []
+
+    def successful_run(command: list[str], **kwargs: Any) -> object:
+        calls.append(command)
+        assert kwargs == {
+            "check": True,
+            "capture_output": True,
+            "encoding": "utf-8",
+            "errors": "replace",
+            "timeout": 10.0,
+        }
+        if command[-2:] == ["rev-parse", "--show-toplevel"]:
+            stdout = str(tmp_path)
+        elif command[-2:] == ["rev-parse", "HEAD"]:
+            stdout = "a" * 40
+        else:
+            assert command[-3:] == [
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=all",
+            ]
+            stdout = "?? zeta\n M alpha\n"
+        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", successful_run)
+    available = _repository_provenance()
+    assert set(available) == expected_keys
+    assert available["repository_root"] == str(tmp_path.resolve())
+    assert available["git_commit"] == "a" * 40
+    assert available["git_dirty"] is True
+    assert available["git_status_lines"] == [" M alpha", "?? zeta"]
+    assert available["git_status"] == "available"
+    assert available["git_error"] is None
+    assert available["torch_num_threads"] == torch.get_num_threads()
+    assert available["torch_num_interop_threads"] == (
+        torch.get_num_interop_threads()
+    )
+    assert len(calls) == 3
+    assert all(command[:2] == ["git", "-C"] for command in calls)
+
+    def unavailable_run(_command: list[str], **_kwargs: Any) -> object:
+        raise OSError("git is unavailable")
+
+    monkeypatch.setattr(subprocess, "run", unavailable_run)
+    unavailable = _repository_provenance()
+    assert set(unavailable) == expected_keys
+    assert unavailable["repository_root"] is None
+    assert unavailable["git_commit"] is None
+    assert unavailable["git_dirty"] is None
+    assert unavailable["git_status_lines"] == []
+    assert unavailable["git_status"] == "unavailable"
+    assert unavailable["git_error"] == "OSError: git is unavailable"
+
+
+def test_torch_thread_contract_and_cli_positive_integer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = {"intraop": 4, "interop": 3}
+    monkeypatch.setattr(torch, "get_num_threads", lambda: state["intraop"])
+    monkeypatch.setattr(
+        torch,
+        "get_num_interop_threads",
+        lambda: state["interop"],
+    )
+    monkeypatch.setattr(
+        torch,
+        "set_num_threads",
+        lambda value: state.__setitem__("intraop", value),
+    )
+    monkeypatch.setattr(
+        torch,
+        "set_num_interop_threads",
+        lambda value: state.__setitem__("interop", value),
+    )
+    monkeypatch.setenv("OMP_NUM_THREADS", "test-original")
+    monkeypatch.setenv("MKL_NUM_THREADS", "test-original")
+
+    _configure_torch_threads(2)
+    assert _execution_record("cpu") == {
+        "device": "cpu",
+        "torch_num_threads": 2,
+        "torch_num_interop_threads": 1,
+    }
+    with pytest.raises(TypeError, match="integer or None"):
+        _configure_torch_threads(True)
+    with pytest.raises(ValueError, match="positive"):
+        _configure_torch_threads(0)
+
+    parser = p4_audit_cli_parser()
+    assert parser.parse_args(["config.yaml"]).torch_threads is None
+    assert parser.parse_args(
+        ["config.yaml", "--torch-threads", "1"]
+    ).torch_threads == 1
+    with pytest.raises(SystemExit):
+        parser.parse_args(["config.yaml", "--torch-threads", "0"])
+
+
+def test_direct_config_replacements_fail_before_any_output(tmp_path: Path) -> None:
+    config_path, _ = _make_config(tmp_path)
+    loaded = load_p4_audit_config(config_path)
+    replacements = {
+        "claim": dataclasses.replace(
+            loaded,
+            claim_context=dataclasses.replace(
+                loaded.claim_context,
+                formal_statistical_claim=True,
+            ),
+        ),
+        "evidence": dataclasses.replace(
+            loaded,
+            evidence_scope=dataclasses.replace(
+                loaded.evidence_scope,
+                sumo_contract_integration=True,
+            ),
+        ),
+        "fairness": dataclasses.replace(
+            loaded,
+            fairness=dataclasses.replace(
+                loaded.fairness,
+                paired_clean_attacked=False,
+            ),
+        ),
+        "projector": dataclasses.replace(
+            loaded,
+            projector=dataclasses.replace(
+                loaded.projector,
+                factory="unregistered.module:projector",
+            ),
+        ),
+    }
+    for name, replaced in replacements.items():
+        output = tmp_path / f"direct-{name}-output"
+        with pytest.raises(ValueError):
+            run_p4_audit(replaced, output_directory=output)
+        assert not output.exists()
+
+
+def test_loaded_config_rejects_source_rewrite_even_if_hash_is_replaced(
+    tmp_path: Path,
+) -> None:
+    config_path, _ = _make_config(tmp_path)
+    loaded = load_p4_audit_config(config_path)
+    values = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    values["name"] = "rewritten_after_load"
+    config_path.write_text(
+        yaml.safe_dump(values, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    stale_output = tmp_path / "stale-source-output"
+    with pytest.raises(ValueError, match="source config SHA-256 mismatch"):
+        run_p4_audit(loaded, output_directory=stale_output)
+    assert not stale_output.exists()
+
+    hash_replaced = dataclasses.replace(
+        loaded,
+        config_sha256=_sha256(config_path),
+    )
+    replaced_output = tmp_path / "hash-replaced-output"
+    with pytest.raises(ValueError, match="differs from its freshly parsed source"):
+        run_p4_audit(hash_replaced, output_directory=replaced_output)
+    assert not replaced_output.exists()
+
+
+def test_source_config_mutation_during_execution_fails_pinned_rehash(
+    tmp_path: Path,
+) -> None:
+    config_path, factorization = _make_config(tmp_path)
+    mutated = False
+
+    def mutating_factory(context: AttackBuildContext) -> object:
+        nonlocal mutated
+        if not mutated:
+            config_path.write_text(
+                config_path.read_text(encoding="utf-8") + "\n# runtime mutation\n",
+                encoding="utf-8",
+            )
+            mutated = True
+        return build_stfa_attack(context)
+
+    output = tmp_path / "runtime-source-mutation-output"
+    with pytest.raises(InvalidP4Audit, match="source config SHA-256 mismatch"):
+        run_p4_audit(
+            config_path,
+            output_directory=output,
+            environment_factory=TinyNineActionEnv,
+            artifact_loader=_artifact_loader(factorization),
+            attack_factory=mutating_factory,
+        )
+    invalid = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
+    assert invalid["status"] == "invalid"
+    assert invalid["claim_context"] == dataclasses.asdict(ClaimContext())
+    assert "summary" not in invalid
 
 
 def test_output_overwrite_and_input_alias_guards(tmp_path: Path) -> None:
@@ -1062,6 +1351,20 @@ def test_non_sumo_positive_discrete_budget_is_rejected_by_schema(
         encoding="utf-8",
     )
     with pytest.raises(ValueError, match="exact registered SUMO"):
+        load_p4_audit_config(config_path)
+
+
+def test_mergelite_registry_rejects_non_exact_factory_and_runtime(
+    tmp_path: Path,
+) -> None:
+    config_path, _ = _make_config(tmp_path)
+    values = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    values["environment"]["registry_key"] = P4_MERGELITE_ENVIRONMENT_REGISTRY
+    config_path.write_text(
+        yaml.safe_dump(values, sort_keys=False),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="exact registered"):
         load_p4_audit_config(config_path)
 
 

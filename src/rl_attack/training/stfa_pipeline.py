@@ -111,6 +111,8 @@ class CriticDataset:
     provenance: dict[str, Any]
     factorization: ActionFactorization
     transitions: SafetyTransitionBatch
+    verified_runtime_environment_contract_sha256: str
+    runtime_environment_contract_verification_source: str
 
 
 @dataclass(frozen=True)
@@ -122,6 +124,8 @@ class DirectorDataset:
     provenance: dict[str, Any]
     factorization: ActionFactorization
     batch: STFADirectorTrainingBatch
+    verified_runtime_environment_contract_sha256: str
+    runtime_environment_contract_verification_source: str
 
 
 @dataclass(frozen=True)
@@ -575,9 +579,7 @@ def _validate_critic_sidecar(
         factorization=factorization,
         observation_shape=observation_shape,
     )
-    _strict_keys(
-        result,
-        required={
+    required_fields = {
             "schema_version",
             "artifact_type",
             "dataset",
@@ -588,9 +590,20 @@ def _validate_critic_sidecar(
             "cost_definition",
             "next_policy_probabilities",
             "terminal_semantics",
-        },
-        name="critic dataset sidecar",
-    )
+    }
+    optional_fields = {"p4_runtime_environment_contract_sha256"}
+    missing = required_fields - set(result)
+    extra = set(result) - required_fields - optional_fields
+    if missing or extra:
+        raise ValueError(
+            "critic dataset sidecar fields are invalid; "
+            f"missing={sorted(missing)!r}, extra={sorted(extra)!r}"
+        )
+    if "p4_runtime_environment_contract_sha256" in result:
+        result["p4_runtime_environment_contract_sha256"] = validate_sha256(
+            result["p4_runtime_environment_contract_sha256"],
+            name="critic dataset P4 runtime environment contract SHA-256",
+        )
     result["collector_version"] = _nonempty_string(
         result["collector_version"], name="collector_version"
     )
@@ -669,9 +682,7 @@ def _validate_director_sidecar(
         factorization=factorization,
         observation_shape=observation_shape,
     )
-    _strict_keys(
-        result,
-        required={
+    required_fields = {
             "schema_version",
             "artifact_type",
             "dataset",
@@ -683,9 +694,20 @@ def _validate_director_sidecar(
             "temporal_budget",
             "horizon",
             "labeler",
-        },
-        name="director dataset sidecar",
-    )
+    }
+    optional_fields = {"p4_runtime_environment_contract_sha256"}
+    missing = required_fields - set(result)
+    extra = set(result) - required_fields - optional_fields
+    if missing or extra:
+        raise ValueError(
+            "director dataset sidecar fields are invalid; "
+            f"missing={sorted(missing)!r}, extra={sorted(extra)!r}"
+        )
+    if "p4_runtime_environment_contract_sha256" in result:
+        result["p4_runtime_environment_contract_sha256"] = validate_sha256(
+            result["p4_runtime_environment_contract_sha256"],
+            name="director dataset P4 runtime environment contract SHA-256",
+        )
     result["collector_version"] = _nonempty_string(
         result["collector_version"], name="collector_version"
     )
@@ -817,12 +839,53 @@ def _validate_ontology(
         raise ValueError("action ontology SHA-256 does not match the expected digest")
 
 
+def _verified_runtime_environment_contract(
+    provenance: Mapping[str, Any],
+    *,
+    expected_sha256: str | None,
+    dataset_kind: str,
+) -> tuple[str, str]:
+    """Resolve a runtime environment hash without trusting a sidecar self-report."""
+
+    legacy_sha256 = canonical_json_sha256(provenance["environment"])
+    declared_sha256 = provenance.get("p4_runtime_environment_contract_sha256")
+    if expected_sha256 is None:
+        if declared_sha256 is not None and declared_sha256 != legacy_sha256:
+            raise ValueError(
+                f"{dataset_kind} dataset sidecar runtime environment contract "
+                "requires an independently trusted expected SHA-256"
+            )
+        source = (
+            "validated_dataset_environment"
+            if declared_sha256 is None
+            else "validated_dataset_environment_with_matching_declaration"
+        )
+        return legacy_sha256, source
+
+    trusted_sha256 = validate_sha256(
+        expected_sha256,
+        name="expected_runtime_environment_contract_sha256",
+    )
+    if declared_sha256 is None:
+        raise ValueError(
+            f"{dataset_kind} dataset sidecar is missing the runtime environment "
+            "contract required by the trusted expected SHA-256"
+        )
+    if declared_sha256 != trusted_sha256:
+        raise ValueError(
+            f"{dataset_kind} dataset sidecar runtime environment contract does "
+            "not match the trusted expected SHA-256"
+        )
+    return trusted_sha256, "trusted_expected_and_sidecar_declaration"
+
+
 def load_critic_dataset(
     path: str | Path,
     *,
     expected_sha256: str,
     expected_manifest_sha256: str,
     expected_action_ontology_sha256: str,
+    expected_runtime_environment_contract_sha256: str | None = None,
 ) -> CriticDataset:
     source, digest, arrays = _strict_npz(
         path,
@@ -875,6 +938,13 @@ def load_critic_dataset(
         factorization=factorization,
         observation_shape=tuple(observations.shape[1:]),
     )
+    runtime_environment_sha256, verification_source = (
+        _verified_runtime_environment_contract(
+            provenance,
+            expected_sha256=expected_runtime_environment_contract_sha256,
+            dataset_kind="critic",
+        )
+    )
     return CriticDataset(
         source,
         digest,
@@ -883,6 +953,8 @@ def load_critic_dataset(
         provenance,
         factorization,
         transitions,
+        runtime_environment_sha256,
+        verification_source,
     )
 
 
@@ -892,6 +964,7 @@ def load_director_dataset(
     expected_sha256: str,
     expected_manifest_sha256: str,
     expected_action_ontology_sha256: str,
+    expected_runtime_environment_contract_sha256: str | None = None,
 ) -> DirectorDataset:
     source, digest, arrays = _strict_npz(
         path,
@@ -938,6 +1011,13 @@ def load_director_dataset(
         factorization=factorization,
         observation_shape=tuple(observations.shape[1:]),
     )
+    runtime_environment_sha256, verification_source = (
+        _verified_runtime_environment_contract(
+            provenance,
+            expected_sha256=expected_runtime_environment_contract_sha256,
+            dataset_kind="director",
+        )
+    )
     return DirectorDataset(
         source,
         digest,
@@ -946,6 +1026,8 @@ def load_director_dataset(
         provenance,
         factorization,
         batch,
+        runtime_environment_sha256,
+        verification_source,
     )
 
 
@@ -1197,7 +1279,9 @@ def _safety_dataset_binding(
         "dataset_sha256": dataset.file_sha256,
         "dataset_manifest_sha256": dataset.manifest_sha256,
         "provenance_sha256": canonical_json_sha256(provenance),
-        "environment_contract_sha256": canonical_json_sha256(provenance["environment"]),
+        "environment_contract_sha256": (
+            dataset.verified_runtime_environment_contract_sha256
+        ),
         "normalization_contract_sha256": provenance["environment"]["observation_space"][
             "normalization"
         ]["sha256"],
@@ -1222,7 +1306,9 @@ def _director_dataset_binding(
         "dataset_sha256": dataset.file_sha256,
         "dataset_manifest_sha256": dataset.manifest_sha256,
         "provenance_sha256": canonical_json_sha256(provenance),
-        "environment_contract_sha256": canonical_json_sha256(provenance["environment"]),
+        "environment_contract_sha256": (
+            dataset.verified_runtime_environment_contract_sha256
+        ),
         "normalization_contract_sha256": provenance["environment"]["observation_space"][
             "normalization"
         ]["sha256"],
@@ -1397,6 +1483,7 @@ def train_critic_from_npz(
     expected_dataset_sha256: str,
     expected_dataset_manifest_sha256: str,
     expected_action_ontology_sha256: str,
+    expected_runtime_environment_contract_sha256: str | None = None,
     output_dir: str | Path,
     run_name: str | None = None,
     overwrite: bool = False,
@@ -1410,6 +1497,9 @@ def train_critic_from_npz(
         expected_sha256=expected_dataset_sha256,
         expected_manifest_sha256=expected_dataset_manifest_sha256,
         expected_action_ontology_sha256=expected_action_ontology_sha256,
+        expected_runtime_environment_contract_sha256=(
+            expected_runtime_environment_contract_sha256
+        ),
     )
     config = (
         STFASafetyCriticConfig(
@@ -1527,6 +1617,7 @@ def train_director_from_npz(
     expected_dataset_sha256: str,
     expected_dataset_manifest_sha256: str,
     expected_action_ontology_sha256: str,
+    expected_runtime_environment_contract_sha256: str | None = None,
     output_dir: str | Path,
     run_name: str | None = None,
     overwrite: bool = False,
@@ -1546,6 +1637,9 @@ def train_director_from_npz(
         expected_sha256=expected_dataset_sha256,
         expected_manifest_sha256=expected_dataset_manifest_sha256,
         expected_action_ontology_sha256=expected_action_ontology_sha256,
+        expected_runtime_environment_contract_sha256=(
+            expected_runtime_environment_contract_sha256
+        ),
     )
     config = (
         STFADirectorConfig(
