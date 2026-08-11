@@ -28,6 +28,7 @@ import tempfile
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from functools import wraps
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -2410,6 +2411,7 @@ class _CallCountingProxy:
         if name not in self._counted_methods or not callable(attribute):
             return attribute
 
+        @wraps(attribute)
         def counted(*args: Any, **kwargs: Any) -> Any:
             self.counts[name] += 1
             return attribute(*args, **kwargs)

@@ -64,6 +64,7 @@ from rl_attack.experiments.p4_audit import (
 )
 from rl_attack.policies.sb3 import SB3CategoricalPolicyAdapter
 from rl_attack.training.robust_sarsa import sb3_policy_state_sha256
+from rl_attack.training.stfa_director import STFADirector, STFADirectorConfig
 
 
 class TinyNineActionEnv(gym.Env[np.ndarray, int]):
@@ -557,6 +558,28 @@ def _artifact_loader(factorization: ActionFactorization):
     return load
 
 
+def _real_director_artifact_loader(factorization: ActionFactorization):
+    def load(_context: object) -> dict[str, object]:
+        director = STFADirector(
+            STFADirectorConfig(
+                observation_shape=(2,),
+                n_actions=factorization.n_actions,
+                hidden_sizes=(8,),
+                selection_threshold=0.0,
+            ),
+            factorization,
+        )
+        director.eval()
+        for parameter in director.parameters():
+            parameter.requires_grad_(False)
+        return {
+            "safety_critic": FakeSafetyCritic(),
+            "director": director,
+        }
+
+    return load
+
+
 def _mutate_embedded_manifest(
     config_path: Path,
     role: str,
@@ -686,6 +709,23 @@ def test_real_sb3_nine_action_paired_hard_k_audit_distinguishes_target(
     assert manifest["victim"]["policy_state_sha256_before"] == manifest["victim"][
         "policy_state_sha256_after"
     ]
+
+
+def test_official_audit_preserves_real_learned_director_signature(
+    tmp_path: Path,
+) -> None:
+    config_path, factorization = _make_config(tmp_path)
+
+    manifest = run_p4_audit(
+        config_path,
+        output_directory=tmp_path / "real_director_output",
+        environment_factory=TinyNineActionEnv,
+        artifact_loader=_real_director_artifact_loader(factorization),
+    )
+
+    assert manifest["status"] == "complete"
+    assert manifest["accounting"]["director_queries"] == 2
+    assert manifest["accounting"]["selected"] == 2
 
 
 def test_invalid_attack_metadata_publishes_no_robust_summary(tmp_path: Path) -> None:
