@@ -26,6 +26,10 @@ PROTOCOL = (
 
 def test_checked_protocol_freezes_science_and_disjoint_seed_splits() -> None:
     protocol = p4_effect_screening.load_screening_protocol(PROTOCOL)
+    assert p4_effect_screening.PROTOCOL_SCHEMA == (
+        "rl_attack.p4_mergelite9_effect_protocol.v2"
+    )
+    assert protocol.name == "p4_mergelite9_stfa_effect_screening_v2a"
     assert protocol.total_timesteps == 150_000
     assert protocol.ppo_n_steps == 512
     assert protocol.ppo_batch_size == 128
@@ -48,6 +52,7 @@ def test_checked_protocol_freezes_science_and_disjoint_seed_splits() -> None:
     assert protocol.temporal_budget.window_k == 2
     assert protocol.attack_steps == 20
     assert protocol.attack_restarts == 5
+    assert protocol.reachable_top_k == 3
     assert protocol.torch_threads == 1
 
     splits = p4_effect_screening._selected_seeds(protocol)
@@ -249,22 +254,73 @@ def test_analyze_has_no_device_override_and_configures_one_thread() -> None:
 def test_factor_coverage_assignment_is_executable_and_3x3_complete() -> None:
     factorization = p4_effect_screening.mergelite9_factorization()
     selected_rows = list(range(12))
-    victim_actions = np.full(12, 4, dtype=np.int64)
-    utility = np.arange(12 * 9, dtype=np.float32).reshape(12, 9) / 100.0
-    baseline = np.zeros(12, dtype=np.float32)
+    target_scores = np.zeros((12, 9), dtype=np.float32)
+    reachable_masks = np.zeros((12, 9), dtype=np.bool_)
+    for row, target in ((0, 0), (4, 4), (8, 8)):
+        reachable_masks[row, target] = True
+        target_scores[row, target] = float(row + 1)
     assignment = p4_effect_screening._factor_coverage_assignment(
         factorization=factorization,
         selected_rows=selected_rows,
-        victim_actions=victim_actions,
-        combined_utility=utility,
-        baseline=baseline,
+        target_scores=target_scores,
+        reachable_masks=reachable_masks,
     )
-    assert len(assignment) == 3
-    assert len(set(assignment)) == 3
-    assert all(target != victim_actions[row] for row, target in assignment.items())
+    assert assignment == {0: 0, 4: 4, 8: 8}
+    assert all(reachable_masks[row, target] for row, target in assignment.items())
     targets = [factorization.decode(target) for target in assignment.values()]
     assert {target.lateral for target in targets} == {-1, 0, 1}
     assert {target.longitudinal for target in targets} == {-1, 0, 1}
+
+    unreachable = reachable_masks.copy()
+    unreachable[:, :] = False
+    unreachable[:, (0, 3, 6)] = True
+    with pytest.raises(RuntimeError, match="positive reachable"):
+        p4_effect_screening._factor_coverage_assignment(
+            factorization=factorization,
+            selected_rows=selected_rows,
+            target_scores=np.where(unreachable, 1.0, 0.0).astype(
+                np.float32
+            ),
+            reachable_masks=unreachable,
+        )
+
+
+def test_reachability_scores_require_positive_harm_inside_mask() -> None:
+    probabilities = np.asarray(
+        [[0.60, 0.30, 0.10], [0.60, 0.30, 0.10]],
+        dtype=np.float32,
+    )
+    learned_costs = np.asarray(
+        [[0.0, 2.0, 4.0], [2.0, 1.0, 0.0]],
+        dtype=np.float32,
+    )
+    exact_costs = learned_costs.copy()
+    masks = np.asarray(
+        [[False, True, True], [False, True, True]],
+        dtype=np.bool_,
+    )
+    scores = p4_effect_screening._reachability_target_scores(
+        victim_probabilities=probabilities,
+        safety_costs=learned_costs,
+        exact_costs=exact_costs,
+        clean_actions=np.asarray([0, 0], dtype=np.int64),
+        reachable_masks=masks,
+    )
+
+    assert scores.shape == probabilities.shape
+    assert np.all(scores[~masks] == 0.0)
+    assert scores[0, 1] > scores[0, 2]
+    assert np.all(scores[1] == 0.0)
+
+
+def test_episode_opportunities_skip_zero_reachability_rows() -> None:
+    spec = p4_effect_screening.TemporalBudgetSpec(k=3)
+    selected = p4_effect_screening._select_episode_opportunities(
+        [0, 1, 2, 3],
+        np.asarray([0.0, 0.4, 0.0, 0.2], dtype=np.float32),
+        spec,
+    )
+    assert selected == [1, 3]
 
 
 def test_tiny_prepare_reaches_official_artifact_binding_gate(
@@ -280,7 +336,10 @@ def test_tiny_prepare_reaches_official_artifact_binding_gate(
         n_epochs=1,
     )
     raw["victim"]["admission"]["episodes"] = 1
-    raw["datasets"].update(critic_episodes=1, director_episodes=1)
+    # The deliberately under-trained 128-step PPO fixture needs a wider
+    # candidate set to exercise every factor in the artifact-binding path.
+    # The checked v2a protocol remains fixed at 200 episodes and top-3.
+    raw["datasets"].update(critic_episodes=1, director_episodes=10)
     raw["artifacts"].update(
         critic_gradient_steps=2,
         critic_batch_size=8,
@@ -289,6 +348,7 @@ def test_tiny_prepare_reaches_official_artifact_binding_gate(
     )
     raw["attack"].update(
         temporal_budget={"k": 3, "min_gap": 0, "window_size": None, "window_k": None},
+        reachable_top_k=8,
         steps=1,
         restarts=1,
         validation_episodes=1,
@@ -316,7 +376,18 @@ def test_tiny_prepare_reaches_official_artifact_binding_gate(
         ("attack_validation", "validation_audit_config"),
         ("final_audit", "final_audit_config"),
     ):
-        assert result["official_audit_input_validation"][cohort] == {
+        validation = result["official_audit_input_validation"][cohort]
+        assert {
+            key: validation[key]
+            for key in (
+                "config_sha256",
+                "safety_critic_sidecar_verified",
+                "director_sidecar_verified",
+                "environment_contract_sha256",
+                "normalization_contract_sha256",
+                "cost_definition_sha256",
+            )
+        } == {
             "config_sha256": result["artifacts"][artifact]["sha256"],
             "safety_critic_sidecar_verified": True,
             "director_sidecar_verified": True,
@@ -324,6 +395,15 @@ def test_tiny_prepare_reaches_official_artifact_binding_gate(
             "normalization_contract_sha256": result["contracts"]["normalization"],
             "cost_definition_sha256": result["contracts"]["safety_cost"],
         }
+        assert validation["director_victim_probability_source"] == (
+            p4_effect_screening.DIRECTOR_VICTIM_PROBABILITY_SOURCE
+        )
+        assert len(
+            validation[
+                "director_victim_probability_contract_sha256"
+            ]
+        ) == 64
+        assert validation["director_reachable_top_k"] == 8
     assert set(result["artifacts"]) == p4_effect_screening._PREPARATION_ARTIFACT_NAMES
     assert result["preparation_contract"]["sha256"] == canonical_json_sha256(
         result["preparation_contract"]["payload"]

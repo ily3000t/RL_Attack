@@ -1,8 +1,24 @@
-# P4 MergeLite9 effect screening
+# P4 MergeLite9 reachability-aware effect screening v2a
 
 This stage is a non-formal, one-victim-seed gate for the proposed STFA attack.
 It uses the repository-owned eight-observation, nine-action `MergeLite9Env`;
 it is not SUMO evidence and cannot authorize P5 directly.
+
+The original v1 validation was a NO-GO: all 117 selected perturbations reached
+the `0.025` L-infinity bound, but only 20 changed the victim action and only one
+hit the director target. Mean paired return drop was `-0.03198`, so the attack
+did not harm the victim. The frozen v1 final cohort was never run or inspected.
+The failure analysis found two coupled contract problems: director training
+used argmax one-hot policy features while online inference used softmax, and
+targets were ranked for harm without a policy-boundary reachability proxy.
+
+v2a changes only those two factors. Critic Bellman continuation remains
+deterministic argmax one-hot. Director training and inference both use the
+frozen PPO categorical softmax, and target labels/online decoding are limited
+to the three highest-probability available non-clean actions. Within that mask,
+labels maximize normalized positive safety-harm advantage multiplied by the
+target-to-clean probability ratio. This is a validation hypothesis, not a
+positive result claim.
 
 The checked protocol is
 `configs/experiments/p4_mergelite9_effect_screening.yaml`. It fixes:
@@ -18,6 +34,8 @@ The checked protocol is
   indices `0/7` are immutable and the nominal maximum L-infinity is `0.025`;
 - temporal budget: `H=64`, `K=8`, `min_gap=2`, `window=16`, `window_k=2`;
 - STFA: full objective, learned online director, 20 steps and 5 restarts;
+- reachability: exact train/runtime PPO-softmax parity and deterministic top-3
+  available non-clean target filtering; ties use the lower action index;
 - attack validation: 50 disjoint seeds `544000..544049`; only this split may
   be inspected while tuning;
 - final screen: 50 paired held-out seeds `545000..545049` and exactly 10,000
@@ -30,9 +48,9 @@ environment:
 Set-Location E:\RL_Attack
 $python = ".\.venv\Scripts\python.exe"
 $protocol = ".\configs\experiments\p4_mergelite9_effect_screening.yaml"
-$prepared = ".\outputs\p4_mergelite9_effect_prepared"
-$validationAudit = ".\outputs\p4_mergelite9_effect_validation_audit"
-$finalAudit = ".\outputs\p4_mergelite9_effect_final_audit"
+$prepared = ".\outputs\p4_mergelite9_effect_v2a_prepared"
+$validationAudit = ".\outputs\p4_mergelite9_effect_v2a_validation_audit"
+$finalAudit = ".\outputs\p4_mergelite9_effect_v2a_final_audit"
 $env:OMP_NUM_THREADS = "1"
 $env:MKL_NUM_THREADS = "1"
 $env:OPENBLAS_NUM_THREADS = "1"
@@ -67,6 +85,13 @@ validation and final configs differ only in name/path and their disjoint seed
 split. Once the final audit is first run, its configuration and seeds are
 single-use: a failed result must not be repaired and rerun on the same final
 split.
+
+The v2 director dataset sidecar binds the exact softmax feature source, its
+contract SHA-256 and `reachable_top_k=3`. Loading and training recompute the
+softmax from the pinned PPO, reconstruct every reachable mask, and compare the
+director config to the dataset binding. The critic dataset independently
+recomputes its deterministic one-hot continuation probabilities; the two
+probability semantics cannot be silently substituted for each other.
 
 Running the final audit consumes that cohort whether the gate passes or fails.
 A pass may only feed the already registered matched-baseline comparison and

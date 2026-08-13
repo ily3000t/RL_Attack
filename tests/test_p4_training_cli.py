@@ -22,11 +22,15 @@ from rl_attack.core.artifacts import (
     strict_json_write,
 )
 from rl_attack.policies.sb3 import SB3CategoricalPolicyAdapter
+from rl_attack.training.stfa_director import reachable_action_mask
 from rl_attack.training.stfa_pipeline import (
     CRITIC_DATASET_MANIFEST_SCHEMA,
     CRITIC_DATASET_SCHEMA,
     DIRECTOR_DATASET_MANIFEST_SCHEMA,
+    DIRECTOR_DATASET_MANIFEST_SCHEMA_V2,
     DIRECTOR_DATASET_SCHEMA,
+    DIRECTOR_REACHABILITY_RULE,
+    DIRECTOR_VICTIM_PROBABILITY_SOURCE,
     action_ontology_contract,
     dataset_environment_contract,
     dataset_manifest_path,
@@ -253,9 +257,10 @@ def _write_director_dataset(
     critic_manifest: dict[str, object],
     critic_checkpoint: Path,
     critic_checkpoint_sha256: str,
+    manifest_schema: str = DIRECTOR_DATASET_MANIFEST_SCHEMA,
 ) -> tuple[Path, str, str]:
     factorization = _factorization()
-    observations = np.asarray(
+    legacy_observations = np.asarray(
         [
             [0.00, 0.00, 0.00, 0.00],
             [0.02, -0.01, 0.01, 0.00],
@@ -264,9 +269,66 @@ def _write_director_dataset(
         ],
         dtype=np.float32,
     )
+    if manifest_schema == DIRECTOR_DATASET_MANIFEST_SCHEMA_V2:
+        generator = np.random.default_rng(20260811)
+        candidates = generator.uniform(
+            low=np.asarray([-4.0, -10.0, -0.4, -10.0]),
+            high=np.asarray([4.0, 10.0, 0.4, 10.0]),
+            size=(4096, 4),
+        ).astype(np.float32)
+        candidate_probabilities = _probabilities(victim.model, candidates)
+        clean_actions = np.argmax(candidate_probabilities, axis=1)
+        rows_by_action = [np.flatnonzero(clean_actions == action) for action in range(2)]
+        if any(len(rows) == 0 for rows in rows_by_action):
+            raise RuntimeError("tiny PPO fixture did not expose both clean actions")
+        observations = np.stack(
+            [
+                candidates[int(rows_by_action[1][0])],
+                candidates[int(rows_by_action[0][0])],
+                candidates[int(rows_by_action[0][-1])],
+                candidates[int(rows_by_action[1][-1])],
+            ]
+        )
+    elif manifest_schema == DIRECTOR_DATASET_MANIFEST_SCHEMA:
+        observations = legacy_observations
+    else:
+        raise ValueError("test helper received an unsupported director manifest schema")
+    softmax_probabilities = _probabilities(victim.model, observations)
+    if (
+        manifest_schema == DIRECTOR_DATASET_MANIFEST_SCHEMA
+        and victim.action_mode == "deterministic"
+    ):
+        clean = np.argmax(softmax_probabilities, axis=1)
+        victim_probabilities = np.eye(2, dtype=np.float32)[clean]
+    else:
+        victim_probabilities = softmax_probabilities
+    if manifest_schema == DIRECTOR_DATASET_MANIFEST_SCHEMA_V2:
+        clean_actions = np.argmax(victim_probabilities, axis=1)
+        target_actions = np.asarray(
+            [1 - int(clean_actions[0]), 1 - int(clean_actions[1]), -1, -1],
+            dtype=np.int64,
+        )
+        available_action_masks = np.stack(
+            [
+                reachable_action_mask(
+                    row,
+                    clean_action=int(clean_actions[index]),
+                    available_action_mask=np.ones(2, dtype=np.bool_),
+                    top_k=1,
+                )
+                for index, row in enumerate(victim_probabilities)
+            ]
+        )
+    else:
+        target_actions = np.asarray([0, 1, -1, -1], dtype=np.int64)
+        available_action_masks = np.ones((4, 2), dtype=np.bool_)
     with torch.no_grad():
         safety_costs = critic(torch.as_tensor(observations)).cpu().numpy()
-    dataset = root / "director_dataset.npz"
+    dataset = root / (
+        "director_dataset_v2.npz"
+        if manifest_schema == DIRECTOR_DATASET_MANIFEST_SCHEMA_V2
+        else "director_dataset.npz"
+    )
     np.savez(
         dataset,
         schema_version=np.asarray(DIRECTOR_DATASET_SCHEMA),
@@ -277,7 +339,7 @@ def _write_director_dataset(
         action_longitudinal=np.asarray([-1, 1], dtype=np.int64),
         action_available=np.ones(2, dtype=np.bool_),
         observations=observations,
-        victim_probabilities=_probabilities(victim.model, observations),
+        victim_probabilities=victim_probabilities,
         safety_costs=safety_costs.astype(np.float32),
         time_features=np.asarray(
             [
@@ -289,8 +351,8 @@ def _write_director_dataset(
             dtype=np.float32,
         ),
         selection_targets=np.asarray([1.0, 1.0, 0.0, 0.0], dtype=np.float32),
-        target_actions=np.asarray([0, 1, -1, -1], dtype=np.int64),
-        available_action_masks=np.ones((4, 2), dtype=np.bool_),
+        target_actions=target_actions,
+        available_action_masks=available_action_masks,
     )
     labeler = director_labeler_contract(
         name="test_opportunity_labeler",
@@ -299,10 +361,22 @@ def _write_director_dataset(
             "positive": "fixture rows zero and one",
             "negative_target": -1,
         },
-        config={"cost_weight": 1.0, "policy_weight": 1.0},
+        config={
+            "cost_weight": 1.0,
+            "policy_weight": 1.0,
+            **(
+                {
+                    "victim_probability_source": DIRECTOR_VICTIM_PROBABILITY_SOURCE,
+                    "reachable_top_k": 1,
+                    "reachability_rule": DIRECTOR_REACHABILITY_RULE,
+                }
+                if manifest_schema == DIRECTOR_DATASET_MANIFEST_SCHEMA_V2
+                else {}
+            ),
+        },
     )
     sidecar = {
-        "schema_version": DIRECTOR_DATASET_MANIFEST_SCHEMA,
+        "schema_version": manifest_schema,
         "artifact_type": "stfa_director_dataset",
         "dataset": {
             "filename": dataset.name,
@@ -317,9 +391,21 @@ def _write_director_dataset(
         "victim": {
             "checkpoint_sha256": victim.checkpoint_sha256,
             "policy_state_sha256": victim.policy_state_sha256,
-            "action_mode": "stochastic",
+            "action_mode": victim.action_mode,
         },
         "collector_version": "p4-test-fixed-fixture-v1",
+        **(
+            {
+                "victim_probabilities": {
+                    "source": DIRECTOR_VICTIM_PROBABILITY_SOURCE,
+                    "temperature": 1.0,
+                    "candidate_rule": DIRECTOR_REACHABILITY_RULE,
+                    "reachable_top_k": 1,
+                }
+            }
+            if manifest_schema == DIRECTOR_DATASET_MANIFEST_SCHEMA_V2
+            else {}
+        ),
         "safety_critic": {
             "checkpoint_sha256": critic_checkpoint_sha256,
             "state_sha256": critic_manifest["critic"]["state_sha256"],
@@ -457,6 +543,103 @@ def test_critic_and_director_cli_train_complete_pinned_bundles(
     assert director_run["validation"]["safety_costs_recomputed_from_pinned_critic"]
     assert director_run["training"]["random_untrained_artifact"] is False
 
+    v2_dataset, v2_data_sha, v2_manifest_sha = _write_director_dataset(
+        tmp_path,
+        victim=victim,
+        critic=critic,
+        critic_manifest=critic_method_manifest,
+        critic_checkpoint=critic_checkpoint,
+        critic_checkpoint_sha256=critic_sha,
+        manifest_schema=DIRECTOR_DATASET_MANIFEST_SCHEMA_V2,
+    )
+    loaded_v2 = load_director_dataset(
+        v2_dataset,
+        expected_sha256=v2_data_sha,
+        expected_manifest_sha256=v2_manifest_sha,
+        expected_action_ontology_sha256=_factorization().ontology_hash,
+    )
+    assert loaded_v2.provenance["victim_probabilities"] == {
+        "source": DIRECTOR_VICTIM_PROBABILITY_SOURCE,
+        "temperature": 1.0,
+        "candidate_rule": DIRECTOR_REACHABILITY_RULE,
+        "reachable_top_k": 1,
+    }
+    v2_args = parser.parse_args(
+        [
+            "director",
+            "--victim-checkpoint",
+            str(victim_checkpoint),
+            "--expected-victim-checkpoint-sha256",
+            sha256_file(victim_checkpoint),
+            "--critic-checkpoint",
+            str(critic_checkpoint),
+            "--expected-critic-checkpoint-sha256",
+            critic_sha,
+            "--dataset",
+            str(v2_dataset),
+            "--expected-dataset-sha256",
+            v2_data_sha,
+            "--expected-dataset-manifest-sha256",
+            v2_manifest_sha,
+            "--expected-action-ontology-sha256",
+            _factorization().ontology_hash,
+            "--gradient-steps",
+            "2",
+            "--hidden-sizes",
+            "8",
+            "--output-dir",
+            str(tmp_path / "outputs"),
+            "--run-name",
+            "director-v2-softmax-reachable",
+        ]
+    )
+    v2_run = stfa_training.run(v2_args)
+    method_manifest = v2_run["training"]["method_manifest"]
+    assert method_manifest["director"]["config"]["reachable_top_k"] == 1
+    assert (
+        method_manifest["dataset"]["victim_probability_source"]
+        == DIRECTOR_VICTIM_PROBABILITY_SOURCE
+    )
+    assert method_manifest["dataset"]["reachable_top_k"] == 1
+
+    v2_sidecar_path = dataset_manifest_path(v2_dataset)
+    tampered_mask_dataset = tmp_path / "director_dataset_v2_bad_mask.npz"
+    with np.load(v2_dataset, allow_pickle=False) as archive:
+        tampered_arrays = {name: archive[name].copy() for name in archive.files}
+    tampered_masks = tampered_arrays["available_action_masks"]
+    tampered_masks[2] = ~tampered_masks[2]
+    np.savez(tampered_mask_dataset, **tampered_arrays)
+    tampered_mask_sidecar = strict_json_load(v2_sidecar_path)
+    tampered_mask_sidecar["dataset"] = {
+        "filename": tampered_mask_dataset.name,
+        "sha256": sha256_file(tampered_mask_dataset),
+    }
+    strict_json_write(
+        dataset_manifest_path(tampered_mask_dataset), tampered_mask_sidecar
+    )
+    with pytest.raises(ValueError, match="reachable-top-k contract"):
+        load_director_dataset(
+            tampered_mask_dataset,
+            expected_sha256=sha256_file(tampered_mask_dataset),
+            expected_manifest_sha256=sha256_file(
+                dataset_manifest_path(tampered_mask_dataset)
+            ),
+            expected_action_ontology_sha256=_factorization().ontology_hash,
+        )
+
+    tampered_v2_sidecar = strict_json_load(v2_sidecar_path)
+    tampered_v2_sidecar["victim_probabilities"]["source"] = (
+        "frozen_sb3_ppo_argmax_one_hot"
+    )
+    strict_json_write(v2_sidecar_path, tampered_v2_sidecar)
+    with pytest.raises(ValueError, match="probability/reachability contract"):
+        load_director_dataset(
+            v2_dataset,
+            expected_sha256=v2_data_sha,
+            expected_manifest_sha256=sha256_file(v2_sidecar_path),
+            expected_action_ontology_sha256=_factorization().ontology_hash,
+        )
+
     declared_runtime_sha256 = "d" * 64
     director_sidecar_payload["p4_runtime_environment_contract_sha256"] = (
         declared_runtime_sha256
@@ -484,6 +667,69 @@ def test_critic_and_director_cli_train_complete_pinned_bundles(
     assert (
         loaded_director.runtime_environment_contract_verification_source
         == "trusted_expected_and_sidecar_declaration"
+    )
+
+    deterministic_victim = load_frozen_victim(
+        victim_checkpoint,
+        expected_sha256=sha256_file(victim_checkpoint),
+        action_mode="deterministic",
+        device="cpu",
+    )
+    deterministic_root = tmp_path / "deterministic_v1"
+    deterministic_root.mkdir()
+    deterministic_dataset, deterministic_data_sha, deterministic_manifest_sha = (
+        _write_director_dataset(
+            deterministic_root,
+            victim=deterministic_victim,
+            critic=critic,
+            critic_manifest=critic_method_manifest,
+            critic_checkpoint=critic_checkpoint,
+            critic_checkpoint_sha256=critic_sha,
+        )
+    )
+    deterministic_args = parser.parse_args(
+        [
+            "director",
+            "--victim-checkpoint",
+            str(victim_checkpoint),
+            "--expected-victim-checkpoint-sha256",
+            sha256_file(victim_checkpoint),
+            "--victim-action-mode",
+            "deterministic",
+            "--critic-checkpoint",
+            str(critic_checkpoint),
+            "--expected-critic-checkpoint-sha256",
+            critic_sha,
+            "--dataset",
+            str(deterministic_dataset),
+            "--expected-dataset-sha256",
+            deterministic_data_sha,
+            "--expected-dataset-manifest-sha256",
+            deterministic_manifest_sha,
+            "--expected-action-ontology-sha256",
+            _factorization().ontology_hash,
+            "--gradient-steps",
+            "2",
+            "--hidden-sizes",
+            "8",
+            "--output-dir",
+            str(tmp_path / "outputs"),
+            "--run-name",
+            "director-v1-deterministic-onehot",
+        ]
+    )
+    deterministic_run = stfa_training.run(deterministic_args)
+    assert (
+        deterministic_run["training"]["method_manifest"]["dataset"][
+            "schema_version"
+        ]
+        == "p4-stfa-director-dataset-binding-v1"
+    )
+    assert (
+        deterministic_run["training"]["method_manifest"]["director"]["config"][
+            "reachable_top_k"
+        ]
+        is None
     )
 
     # Python's strict parser hook proves neither run manifest serialized NaN or

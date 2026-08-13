@@ -45,6 +45,12 @@ from rl_attack.training.stfa_safety_critic import (
     validate_frozen_victim_provenance,
 )
 
+STFA_DIRECTOR_DATASET_BINDING_V1 = "p4-stfa-director-dataset-binding-v1"
+STFA_DIRECTOR_DATASET_BINDING_V2 = "p4-stfa-director-dataset-binding-v2"
+STFA_DIRECTOR_SOFTMAX_FEATURE_SOURCE = (
+    "frozen_sb3_ppo_categorical_softmax_features"
+)
+
 
 def _shape(values: Sequence[int], *, name: str) -> tuple[int, ...]:
     raw = tuple(values)
@@ -87,6 +93,75 @@ def _positive_int(value: object, *, name: str) -> int:
     if value <= 0:
         raise ValueError(f"{name} must be positive")
     return value
+
+
+def reachable_action_mask(
+    probabilities: Sequence[float] | np.ndarray,
+    *,
+    clean_action: int,
+    available_action_mask: Sequence[bool] | np.ndarray,
+    top_k: int | None,
+) -> np.ndarray:
+    """Return the deterministic top-k non-clean action mask.
+
+    Ranking uses the frozen victim's categorical softmax probabilities. Ties
+    are resolved by the lower action index so dataset labeling and online
+    inference share an exact, platform-independent candidate contract.
+    ``top_k=None`` preserves the legacy all-available-non-clean behavior.
+    """
+
+    raw_values = np.asarray(probabilities)
+    if raw_values.dtype == np.bool_ or not np.issubdtype(
+        raw_values.dtype, np.number
+    ):
+        raise TypeError("probabilities must contain real numeric values")
+    if np.issubdtype(raw_values.dtype, np.complexfloating):
+        raise TypeError("probabilities must contain real numeric values")
+    values = np.asarray(raw_values, dtype=np.float64)
+    raw_available = np.asarray(available_action_mask)
+    if values.ndim != 1 or values.size < 2:
+        raise ValueError("probabilities must be a one-dimensional action vector")
+    if (
+        not np.all(np.isfinite(values))
+        or np.any(values < 0)
+        or not np.isclose(values.sum(), 1.0, atol=1.0e-6)
+    ):
+        raise ValueError("probabilities must be a finite probability vector")
+    if raw_available.dtype != np.bool_ or raw_available.shape != values.shape:
+        raise TypeError(
+            "available_action_mask must be a strict boolean action vector"
+        )
+    if (
+        isinstance(clean_action, (bool, np.bool_))
+        or not isinstance(clean_action, (int, np.integer))
+        or int(clean_action) < 0
+        or int(clean_action) >= values.size
+    ):
+        raise ValueError("clean_action must be a legal action index")
+    clean_index = int(clean_action)
+    if not bool(raw_available[clean_index]):
+        raise ValueError("clean_action must be available")
+    if top_k is not None:
+        if isinstance(top_k, (bool, np.bool_)) or not isinstance(
+            top_k, (int, np.integer)
+        ):
+            raise TypeError("top_k must be an integer or None")
+        top_k = int(top_k)
+        if top_k <= 0 or top_k >= values.size:
+            raise ValueError("top_k must be in [1, n_actions - 1]")
+
+    candidates = raw_available.astype(np.bool_, copy=True)
+    candidates[clean_index] = False
+    if top_k is not None:
+        available_indices = np.flatnonzero(candidates).tolist()
+        ranked = sorted(
+            available_indices,
+            key=lambda index: (-float(values[index]), int(index)),
+        )
+        candidates[:] = False
+        candidates[np.asarray(ranked[:top_k], dtype=np.int64)] = True
+    candidates.setflags(write=False)
+    return candidates
 
 
 def _tensor(
@@ -282,7 +357,7 @@ def validate_director_dataset_binding(
     if not isinstance(value, Mapping):
         raise TypeError("dataset_binding must be a mapping")
     result = dict(value)
-    keys = {
+    base_keys = {
         "schema_version",
         "dataset_sha256",
         "dataset_manifest_sha256",
@@ -302,20 +377,32 @@ def validate_director_dataset_binding(
         "victim_probabilities_recomputed",
         "safety_costs_recomputed",
     }
+    v2_keys = {
+        "victim_probability_source",
+        "victim_probability_contract_sha256",
+        "reachable_top_k",
+    }
+    schema_version = result.get("schema_version")
+    if schema_version == STFA_DIRECTOR_DATASET_BINDING_V1:
+        keys = base_keys
+    elif schema_version == STFA_DIRECTOR_DATASET_BINDING_V2:
+        keys = base_keys | v2_keys
+    else:
+        raise ValueError("unsupported STFA director dataset binding")
     _strict_keys(
         result,
         allowed=keys,
         required=keys,
         name="STFA director dataset binding",
     )
-    if result["schema_version"] != "p4-stfa-director-dataset-binding-v1":
-        raise ValueError("unsupported STFA director dataset binding")
     hash_fields = keys - {
         "schema_version",
         "temporal_budget",
         "horizon",
         "victim_probabilities_recomputed",
         "safety_costs_recomputed",
+        "victim_probability_source",
+        "reachable_top_k",
     }
     for name in hash_fields:
         result[name] = validate_sha256(result[name], name=name)
@@ -359,6 +446,17 @@ def validate_director_dataset_binding(
         raise ValueError("director dataset victim probabilities were not verified")
     if result["safety_costs_recomputed"] is not True:
         raise ValueError("director dataset safety costs were not verified")
+    if schema_version == STFA_DIRECTOR_DATASET_BINDING_V2:
+        if (
+            result["victim_probability_source"]
+            != STFA_DIRECTOR_SOFTMAX_FEATURE_SOURCE
+        ):
+            raise ValueError(
+                "director dataset victim probability source is invalid"
+            )
+        result["reachable_top_k"] = _positive_int(
+            result["reachable_top_k"], name="reachable_top_k"
+        )
     canonical_json_sha256(result)
     return result
 
@@ -383,6 +481,7 @@ class STFADirectorConfig:
     activation: str = "relu"
     selection_threshold: float = 0.5
     stochastic_inference: bool = False
+    reachable_top_k: int | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -413,6 +512,14 @@ class STFADirectorConfig:
         )
         if type(self.stochastic_inference) is not bool:
             raise TypeError("stochastic_inference must be bool")
+        if self.reachable_top_k is not None:
+            top_k = _positive_int(
+                self.reachable_top_k, name="reachable_top_k"
+            )
+            if top_k >= self.n_actions:
+                raise ValueError(
+                    "reachable_top_k must be less than n_actions"
+                )
 
 
 @dataclass(frozen=True)
@@ -811,6 +918,13 @@ class STFADirector(nn.Module):
             ):
                 raise ValueError("runtime horizon differs from director training")
 
+        if (
+            victim_probabilities is None
+            and self.config.reachable_top_k is not None
+        ):
+            raise ValueError(
+                "victim_probabilities are required by reachability filtering"
+            )
         if victim_probabilities is None:
             probabilities = self._policy_probabilities(
                 context.clean_action_scores
@@ -889,12 +1003,12 @@ class STFADirector(nn.Module):
                 torch.as_tensor(time, dtype=torch.float32),
             )
         selection_probability = float(torch.sigmoid(selection_logit).item())
-        available = np.asarray(context.available_action_mask, dtype=bool)
-        candidate = available.copy()
-        if np.count_nonzero(candidate) > 1:
-            candidate[context.clean_action] = False
-        else:
-            candidate[:] = False
+        candidate = reachable_action_mask(
+            probabilities,
+            clean_action=context.clean_action,
+            available_action_mask=context.available_action_mask,
+            top_k=self.config.reachable_top_k,
+        ).copy()
         pair_logits = (
             lateral_logits.index_select(0, self._action_lateral_ids)
             + longitudinal_logits.index_select(0, self._action_longitudinal_ids)
@@ -930,6 +1044,15 @@ class STFADirector(nn.Module):
             "remaining_budget_fraction": float(time[1]),
             "remaining_steps_fraction": float(time[2]),
             "factorization_ontology_sha256": self.factorization.ontology_hash,
+            "candidate_filter": (
+                "all_available_nonclean"
+                if self.config.reachable_top_k is None
+                else "victim_softmax_top_k_nonclean"
+            ),
+            "reachable_top_k": self.config.reachable_top_k,
+            "reachable_candidate_actions": [
+                int(index) for index in np.flatnonzero(candidate)
+            ],
             "valid_alternative_count": int(np.count_nonzero(candidate)),
         }
         if not selected:
@@ -1031,6 +1154,15 @@ def train_stfa_director(
         critic_binding=binding,
         action_ontology_sha256=factorization.ontology_hash,
     )
+    if dataset["schema_version"] == STFA_DIRECTOR_DATASET_BINDING_V2:
+        if config.reachable_top_k != dataset["reachable_top_k"]:
+            raise ValueError(
+                "director config reachable_top_k differs from its dataset"
+            )
+    elif config.reachable_top_k is not None:
+        raise ValueError(
+            "legacy director dataset cannot claim reachability filtering"
+        )
 
     if director is None:
         director = _build_director(
@@ -1301,6 +1433,15 @@ def _validate_trained_manifest(value: Mapping[str, Any]) -> dict[str, Any]:
         critic_binding=critic,
         action_ontology_sha256=factorization.ontology_hash,
     )
+    if dataset["schema_version"] == STFA_DIRECTOR_DATASET_BINDING_V2:
+        if config.reachable_top_k != dataset["reachable_top_k"]:
+            raise ValueError(
+                "director config reachable_top_k differs from its dataset"
+            )
+    elif config.reachable_top_k is not None:
+        raise ValueError(
+            "legacy director dataset cannot claim reachability filtering"
+        )
     if not isinstance(manifest["training"], Mapping):
         raise ValueError("director training evidence must be a mapping")
     training = dict(manifest["training"])
@@ -1589,7 +1730,11 @@ __all__ = [
     "STFADirectorTrainConfig",
     "STFADirectorTrainingBatch",
     "STFADirectorTrainingResult",
+    "STFA_DIRECTOR_DATASET_BINDING_V1",
+    "STFA_DIRECTOR_DATASET_BINDING_V2",
+    "STFA_DIRECTOR_SOFTMAX_FEATURE_SOURCE",
     "load_stfa_director",
+    "reachable_action_mask",
     "save_stfa_director",
     "stfa_director_manifest_path",
     "train_stfa_director",

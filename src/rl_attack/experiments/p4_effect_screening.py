@@ -78,14 +78,18 @@ from rl_attack.experiments.p4_audit import (
 from rl_attack.policies.sb3 import SB3CategoricalPolicyAdapter
 from rl_attack.training.robust_sarsa import sb3_policy_state_sha256
 from rl_attack.training.stfa_director import (
+    STFA_DIRECTOR_DATASET_BINDING_V2,
     STFADirectorConfig,
     STFADirectorTrainConfig,
+    reachable_action_mask,
 )
 from rl_attack.training.stfa_pipeline import (
     CRITIC_DATASET_MANIFEST_SCHEMA,
     CRITIC_DATASET_SCHEMA,
-    DIRECTOR_DATASET_MANIFEST_SCHEMA,
+    DIRECTOR_DATASET_MANIFEST_SCHEMA_V2,
     DIRECTOR_DATASET_SCHEMA,
+    DIRECTOR_REACHABILITY_RULE,
+    DIRECTOR_VICTIM_PROBABILITY_SOURCE,
     action_ontology_contract,
     dataset_environment_contract,
     dataset_manifest_path,
@@ -101,13 +105,18 @@ from rl_attack.training.stfa_safety_critic import (
     load_stfa_safety_critic,
 )
 
-PREPARATION_SCHEMA = "rl_attack.p4_mergelite9_effect_preparation.v1"
-PROTOCOL_SCHEMA = "rl_attack.p4_mergelite9_effect_protocol.v1"
+PREPARATION_SCHEMA = "rl_attack.p4_mergelite9_effect_preparation.v2"
+PROTOCOL_SCHEMA = "rl_attack.p4_mergelite9_effect_protocol.v2"
 EFFECT_GATE_SCHEMA = "rl_attack.p4_mergelite9_effect_gate.v1"
 PREPARATION_CONTRACT_SCHEMA = "rl_attack.p4_mergelite9_preparation_contract.v1"
 SEED_REGISTRY_VERSION = "p4-mergelite9-effect-seeds-v1"
-COLLECTOR_VERSION = "p4-mergelite9-integrated-collector-v1"
-LABELER_VERSION = "p4-mergelite9-opportunity-labeler-v1"
+COLLECTOR_VERSION = "p4-mergelite9-integrated-collector-v2a"
+LABELER_VERSION = "p4-mergelite9-reachability-labeler-v2a"
+CRITIC_HARM_WEIGHT = 0.55
+EXACT_HARM_WEIGHT = 0.35
+HARM_NORMALIZATION_FLOOR = 1.0e-6
+CLEAN_PROBABILITY_FLOOR = 1.0e-6
+PROBABILITY_RATIO_CEILING = 1.0
 PROJECTOR_NAME = MERGELITE9_PROJECTOR_NAME
 PROJECTOR_VERSION = MERGELITE9_PROJECTOR_VERSION
 PROJECTOR_FACTORY = P4_MERGELITE_PROJECTOR_FACTORY
@@ -212,6 +221,7 @@ class ScreeningProtocol:
     temporal_budget: TemporalBudgetSpec
     attack_steps: int
     attack_restarts: int
+    reachable_top_k: int
     validation_episodes: int
     audit_episodes: int
     torch_threads: int
@@ -241,6 +251,7 @@ class ScreeningProtocol:
             "director_gradient_steps",
             "attack_steps",
             "attack_restarts",
+            "reachable_top_k",
             "validation_episodes",
             "audit_episodes",
             "torch_threads",
@@ -301,6 +312,8 @@ class ScreeningProtocol:
             raise ValueError("director factor coverage requires temporal K >= 3")
         if self.temporal_budget.k >= MERGELITE9_MAX_EPISODE_STEPS:
             raise ValueError("temporal K must be smaller than the MergeLite horizon")
+        if self.reachable_top_k >= 9:
+            raise ValueError("reachable_top_k must be smaller than the action count")
 
     def to_dict(self) -> dict[str, Any]:
         return json.loads(json.dumps(dataclasses.asdict(self), allow_nan=False))
@@ -409,6 +422,7 @@ def load_screening_protocol(path: str | Path) -> ScreeningProtocol:
             "temporal_budget",
             "steps",
             "restarts",
+            "reachable_top_k",
             "validation_episodes",
             "audit_episodes",
         },
@@ -441,6 +455,7 @@ def load_screening_protocol(path: str | Path) -> ScreeningProtocol:
         temporal_budget=TemporalBudgetSpec(**budget),
         attack_steps=attack["steps"],
         attack_restarts=attack["restarts"],
+        reachable_top_k=attack["reachable_top_k"],
         validation_episodes=attack["validation_episodes"],
         audit_episodes=attack["audit_episodes"],
         torch_threads=resources["torch_threads"],
@@ -734,6 +749,19 @@ def _deterministic_probabilities(model: PPO, observations: np.ndarray) -> np.nda
     return probabilities.detach().cpu().numpy().astype(np.float32, copy=False)
 
 
+def _categorical_probabilities(model: PPO, observations: np.ndarray) -> np.ndarray:
+    """Return the exact frozen-PPO softmax feature consumed by STFA at runtime."""
+
+    adapter = SB3CategoricalPolicyAdapter(model)
+    tensor = torch.as_tensor(observations, dtype=torch.float32, device=adapter.device)
+    with torch.no_grad():
+        probabilities = torch.softmax(adapter.logits(tensor), dim=-1)
+    result = probabilities.detach().cpu().numpy().astype(np.float32, copy=False)
+    if not np.all(np.isfinite(result)):
+        raise FloatingPointError("PPO victim produced non-finite categorical probabilities")
+    return result
+
+
 def _runtime_contracts(
     env: gym.Env,
     factorization: ActionFactorization,
@@ -945,6 +973,8 @@ def _select_episode_opportunities(
     selected_steps: list[int] = []
     selected_rows: list[int] = []
     for row in ranked:
+        if float(opportunity[row]) <= 0.0:
+            continue
         step = int(row - first)
         if _can_select(selected_steps, step, spec):
             selected_steps.append(step)
@@ -967,9 +997,8 @@ def _factor_coverage_assignment(
     *,
     factorization: ActionFactorization,
     selected_rows: Sequence[int],
-    victim_actions: np.ndarray,
-    combined_utility: np.ndarray,
-    baseline: np.ndarray,
+    target_scores: np.ndarray,
+    reachable_masks: np.ndarray,
 ) -> dict[int, int]:
     lateral_values = {action.lateral for action in factorization.actions}
     longitudinal_values = {action.longitudinal for action in factorization.actions}
@@ -983,7 +1012,12 @@ def _factor_coverage_assignment(
         } != longitudinal_values:
             continue
         candidate_rows = {
-            action: [row for row in selected_rows if int(victim_actions[row]) != action]
+            action: [
+                row
+                for row in selected_rows
+                if bool(reachable_masks[row, action])
+                and float(target_scores[row, action]) > 0.0
+            ]
             for action in action_indices
         }
         if any(not rows for rows in candidate_rows.values()):
@@ -999,21 +1033,78 @@ def _factor_coverage_assignment(
             row = max(
                 available,
                 key=lambda item: (
-                    float(combined_utility[item, action] - baseline[item]),
+                    float(target_scores[item, action]),
                     -item,
                 ),
             )
             assignment[row] = action
             assigned_rows.add(row)
-            score += float(combined_utility[row, action] - baseline[row])
+            score += float(target_scores[row, action])
         if len(assignment) != 3:
             continue
         candidate = (score, action_indices, assignment)
         if best is None or candidate[:2] > best[:2]:
             best = candidate
     if best is None:
-        raise RuntimeError("director factor coverage has no executable nonvictim row assignment")
+        raise RuntimeError(
+            "director factor coverage has no positive reachable row assignment"
+        )
     return best[2]
+
+
+def _reachability_target_scores(
+    *,
+    victim_probabilities: np.ndarray,
+    safety_costs: np.ndarray,
+    exact_costs: np.ndarray,
+    clean_actions: np.ndarray,
+    reachable_masks: np.ndarray,
+) -> np.ndarray:
+    """Score only positive-harm actions inside the frozen-PPO reachable set."""
+
+    probabilities = np.asarray(victim_probabilities, dtype=np.float32)
+    learned_costs = np.asarray(safety_costs, dtype=np.float32)
+    privileged_costs = np.asarray(exact_costs, dtype=np.float32)
+    actions = np.asarray(clean_actions, dtype=np.int64)
+    masks = np.asarray(reachable_masks)
+    if (
+        probabilities.ndim != 2
+        or learned_costs.shape != probabilities.shape
+        or privileged_costs.shape != probabilities.shape
+        or actions.shape != (probabilities.shape[0],)
+        or masks.shape != probabilities.shape
+        or masks.dtype != np.bool_
+    ):
+        raise ValueError("reachability score tensors have incompatible contracts")
+    if np.any(actions < 0) or np.any(actions >= probabilities.shape[1]):
+        raise ValueError("clean actions are outside the probability action space")
+    if not np.all(np.isfinite(probabilities)) or not np.allclose(
+        probabilities.sum(axis=1), 1.0, rtol=1.0e-5, atol=1.0e-6
+    ):
+        raise ValueError("victim_probabilities must be finite probability rows")
+    if np.any(probabilities < 0) or np.any(learned_costs < 0) or np.any(privileged_costs < 0):
+        raise ValueError("probabilities and safety-harm costs must be non-negative")
+
+    safety_harm = CRITIC_HARM_WEIGHT * learned_costs + EXACT_HARM_WEIGHT * privileged_costs
+    clean_harm = safety_harm[np.arange(len(actions)), actions]
+    positive_harm_advantage = np.maximum(safety_harm - clean_harm[:, None], 0.0)
+    positive_harm_advantage[~masks] = 0.0
+    row_harm_scale = np.max(positive_harm_advantage, axis=1, keepdims=True)
+    normalized_harm_advantage = np.divide(
+        positive_harm_advantage,
+        np.maximum(row_harm_scale, HARM_NORMALIZATION_FLOOR),
+        out=np.zeros_like(positive_harm_advantage),
+        where=row_harm_scale > HARM_NORMALIZATION_FLOOR,
+    )
+    clean_probabilities = probabilities[np.arange(len(actions)), actions][:, None]
+    probability_ratio = np.clip(
+        probabilities / np.maximum(clean_probabilities, CLEAN_PROBABILITY_FLOOR),
+        0.0,
+        PROBABILITY_RATIO_CEILING,
+    )
+    scores = normalized_harm_advantage * probability_ratio
+    scores[~masks] = 0.0
+    return scores.astype(np.float32, copy=False)
 
 
 def _collect_director_dataset(
@@ -1026,6 +1117,7 @@ def _collect_director_dataset(
     seeds: Sequence[int],
     contracts: Mapping[str, str],
     temporal_budget: TemporalBudgetSpec,
+    reachable_top_k: int,
 ) -> dict[str, Any]:
     critic, critic_manifest = load_stfa_safety_critic(
         critic_checkpoint,
@@ -1063,7 +1155,7 @@ def _collect_director_dataset(
         raise RuntimeError("director collector produced no observations")
 
     observation_array = np.asarray(observations, dtype=np.float32)
-    victim_probabilities = _deterministic_probabilities(victim.model, observation_array)
+    victim_probabilities = _categorical_probabilities(victim.model, observation_array)
     with torch.no_grad():
         safety_costs = (
             critic(torch.as_tensor(observation_array, dtype=torch.float32))
@@ -1073,14 +1165,28 @@ def _collect_director_dataset(
             .astype(np.float32, copy=False)
         )
     exact_array = np.asarray(exact_costs, dtype=np.float32)
-    combined_utility = (
-        0.55 * safety_costs + 0.35 * exact_array + 0.10 * (1.0 - victim_probabilities)
-    )
     victim_actions = np.argmax(victim_probabilities, axis=1)
-    baseline = np.sum(combined_utility * victim_probabilities, axis=1)
-    alternative = combined_utility.copy()
-    alternative[np.arange(alternative.shape[0]), victim_actions] = -np.inf
-    opportunity = np.max(alternative, axis=1) - baseline
+    static_availability = np.asarray(factorization.availability, dtype=np.bool_)
+    reachable_masks = np.stack(
+        [
+            reachable_action_mask(
+                row,
+                clean_action=int(victim_actions[index]),
+                available_action_mask=static_availability,
+                top_k=reachable_top_k,
+            )
+            for index, row in enumerate(victim_probabilities)
+        ],
+        axis=0,
+    )
+    target_scores = _reachability_target_scores(
+        victim_probabilities=victim_probabilities,
+        safety_costs=safety_costs,
+        exact_costs=exact_array,
+        clean_actions=victim_actions,
+        reachable_masks=reachable_masks,
+    )
+    opportunity = np.max(target_scores, axis=1)
     selected_rows: list[int] = []
     for rows in episode_rows:
         selected_rows.extend(_select_episode_opportunities(rows, opportunity, temporal_budget))
@@ -1091,13 +1197,12 @@ def _collect_director_dataset(
     selection_targets = np.zeros(len(observations), dtype=np.float32)
     selection_targets[selected_rows] = 1.0
     target_actions = np.full(len(observations), -1, dtype=np.int64)
-    target_actions[selected_rows] = np.argmax(alternative[selected_rows], axis=1)
+    target_actions[selected_rows] = np.argmax(target_scores[selected_rows], axis=1)
     coverage_assignment = _factor_coverage_assignment(
         factorization=factorization,
         selected_rows=selected_rows,
-        victim_actions=victim_actions,
-        combined_utility=combined_utility,
-        baseline=baseline,
+        target_scores=target_scores,
+        reachable_masks=reachable_masks,
     )
     for row, action in coverage_assignment.items():
         target_actions[row] = action
@@ -1127,10 +1232,7 @@ def _collect_director_dataset(
         "time_features": time_features,
         "selection_targets": selection_targets,
         "target_actions": target_actions,
-        "available_action_masks": np.broadcast_to(
-            np.asarray(factorization.availability, dtype=np.bool_),
-            (len(observations), factorization.n_actions),
-        ).copy(),
+        "available_action_masks": reachable_masks,
     }
     digest = _write_npz(path, arrays)
     labeler = director_labeler_contract(
@@ -1138,10 +1240,21 @@ def _collect_director_dataset(
         version=LABELER_VERSION,
         rules={
             "candidate_schedule": "per_episode_top_opportunity_under_exact_hard_ledger",
-            "target": "highest_nonvictim_combined_adversarial_utility",
+            "candidate_mask": (
+                "frozen_ppo_softmax_top_k_available_actions_excluding_clean_"
+                "with_probability_descending_action_index_tie_break"
+            ),
+            "positive_harm": (
+                "max(weighted_target_safety_harm_minus_clean_safety_harm,zero)"
+            ),
+            "target_score": (
+                "row_normalized_positive_harm_times_clipped_target_to_clean_"
+                "softmax_probability_ratio"
+            ),
+            "target": "highest_positive_reachable_target_score",
             "coverage": (
-                "three_distinct_executable_nonvictim_positive_rows_use_an_"
-                "optimized_3_action_assignment_covering_all_3x3_factor_values"
+                "three_distinct_positive_rows_use_only_their_reachable_masks_"
+                "for_an_optimized_3_action_assignment_covering_all_factor_values"
             ),
             "privileged_training_label": (
                 "exact_private_latent_counterfactual_cost_is_used_only_for_"
@@ -1150,16 +1263,22 @@ def _collect_director_dataset(
             "negative_target": -1,
         },
         config={
-            "critic_cost_weight": 0.55,
-            "exact_latent_counterfactual_cost_weight": 0.35,
-            "victim_suppression_weight": 0.10,
+            "critic_cost_weight": CRITIC_HARM_WEIGHT,
+            "exact_latent_counterfactual_cost_weight": EXACT_HARM_WEIGHT,
+            "harm_normalization": "per_row_max_positive_reachable_harm_advantage",
+            "harm_normalization_floor": HARM_NORMALIZATION_FLOOR,
+            "clean_probability_floor": CLEAN_PROBABILITY_FLOOR,
+            "probability_ratio_ceiling": PROBABILITY_RATIO_CEILING,
+            "reachable_top_k": reachable_top_k,
+            "reachability_rule": DIRECTOR_REACHABILITY_RULE,
+            "victim_probability_source": DIRECTOR_VICTIM_PROBABILITY_SOURCE,
             "coverage_assignment": {
                 str(row): action for row, action in sorted(coverage_assignment.items())
             },
         },
     )
     sidecar = {
-        "schema_version": DIRECTOR_DATASET_MANIFEST_SCHEMA,
+        "schema_version": DIRECTOR_DATASET_MANIFEST_SCHEMA_V2,
         "artifact_type": "stfa_director_dataset",
         "dataset": {"filename": path.name, "sha256": digest},
         "environment": environment_record,
@@ -1167,6 +1286,12 @@ def _collect_director_dataset(
         "action_ontology": action_ontology_contract(factorization),
         "victim": _victim_binding(victim),
         "collector_version": COLLECTOR_VERSION,
+        "victim_probabilities": {
+            "source": DIRECTOR_VICTIM_PROBABILITY_SOURCE,
+            "temperature": 1.0,
+            "candidate_rule": DIRECTOR_REACHABILITY_RULE,
+            "reachable_top_k": reachable_top_k,
+        },
         "safety_critic": {
             "checkpoint_sha256": critic_checkpoint_sha256,
             "state_sha256": critic_manifest["critic"]["state_sha256"],
@@ -1189,6 +1314,8 @@ def _collect_director_dataset(
         "positive_labels": len(selected_rows),
         "positive_target_actions": sorted(set(int(item) for item in positive_targets)),
         "labeler_sha256": labeler["sha256"],
+        "victim_probability_source": DIRECTOR_VICTIM_PROBABILITY_SOURCE,
+        "reachable_top_k": reachable_top_k,
     }
 
 
@@ -1440,6 +1567,18 @@ def _validate_official_artifact_bindings(config_path: Path) -> dict[str, Any]:
             config=config,
             verified_dependencies=verified,
         )
+    director_manifest = verified["director"]["manifest"]
+    director_binding = director_manifest["dataset"]
+    director_config = director_manifest["director"]["config"]
+    if (
+        director_binding.get("schema_version")
+        != STFA_DIRECTOR_DATASET_BINDING_V2
+        or director_binding.get("victim_probability_source")
+        != DIRECTOR_VICTIM_PROBABILITY_SOURCE
+        or director_binding.get("reachable_top_k")
+        != director_config.get("reachable_top_k")
+    ):
+        raise ValueError("official director does not carry the v2a probability binding")
     return {
         "config_sha256": config.config_sha256,
         "safety_critic_sidecar_verified": True,
@@ -1447,6 +1586,13 @@ def _validate_official_artifact_bindings(config_path: Path) -> dict[str, Any]:
         "environment_contract_sha256": config.environment.contract_sha256,
         "normalization_contract_sha256": (config.environment.normalization_contract_sha256),
         "cost_definition_sha256": config.safety.cost_definition_sha256,
+        "director_victim_probability_source": director_binding[
+            "victim_probability_source"
+        ],
+        "director_victim_probability_contract_sha256": director_binding[
+            "victim_probability_contract_sha256"
+        ],
+        "director_reachable_top_k": director_binding["reachable_top_k"],
     }
 
 
@@ -1675,6 +1821,7 @@ def prepare_p4_effect_screening(
         seeds=seeds["director_collection"],
         contracts=contracts,
         temporal_budget=resolved_protocol.temporal_budget,
+        reachable_top_k=resolved_protocol.reachable_top_k,
     )
     director_run = train_director_from_npz(
         victim_checkpoint=victim_checkpoint,
@@ -1695,6 +1842,7 @@ def prepare_p4_effect_screening(
             hidden_sizes=resolved_protocol.hidden_sizes,
             selection_threshold=0.5,
             stochastic_inference=False,
+            reachable_top_k=resolved_protocol.reachable_top_k,
         ),
         train_config=STFADirectorTrainConfig(
             gradient_steps=resolved_protocol.director_gradient_steps,
@@ -2243,6 +2391,32 @@ def verify_p4_effect_screening(
         expected_action_ontology_sha256=factorization.ontology_hash,
         expected_runtime_environment_contract_sha256=(final_config.environment.contract_sha256),
     )
+    recomputed_critic_probabilities = _deterministic_probabilities(
+        victim,
+        loaded_critic_dataset.transitions.next_observations.numpy(),
+    )
+    if not np.allclose(
+        loaded_critic_dataset.transitions.next_policy_probabilities.numpy(),
+        recomputed_critic_probabilities,
+        rtol=1.0e-5,
+        atol=1.0e-6,
+    ):
+        raise ValueError(
+            "critic next_policy_probabilities do not match deterministic PPO one-hot"
+        )
+    recomputed_director_probabilities = _categorical_probabilities(
+        victim,
+        loaded_director_dataset.batch.observations.numpy(),
+    )
+    if not np.allclose(
+        loaded_director_dataset.batch.victim_probabilities.numpy(),
+        recomputed_director_probabilities,
+        rtol=1.0e-5,
+        atol=1.0e-6,
+    ):
+        raise ValueError(
+            "director victim_probabilities do not match frozen PPO categorical softmax"
+        )
     dataset_records = manifest.get("datasets")
     if not isinstance(dataset_records, Mapping) or set(dataset_records) != {
         "critic",
@@ -2294,6 +2468,8 @@ def verify_p4_effect_screening(
         "positive_labels",
         "positive_target_actions",
         "labeler_sha256",
+        "victim_probability_source",
+        "reachable_top_k",
     }:
         raise ValueError("preparation director dataset declaration fields are invalid")
     director_batch = loaded_director_dataset.batch
@@ -2310,6 +2486,13 @@ def verify_p4_effect_screening(
         or director_record["positive_target_actions"] != positive_targets
         or director_record["labeler_sha256"]
         != loaded_director_dataset.provenance["labeler"]["sha256"]
+        or director_record["victim_probability_source"]
+        != DIRECTOR_VICTIM_PROBABILITY_SOURCE
+        or director_record["victim_probability_source"]
+        != loaded_director_dataset.provenance["victim_probabilities"]["source"]
+        or director_record["reachable_top_k"] != protocol.reachable_top_k
+        or director_record["reachable_top_k"]
+        != loaded_director_dataset.provenance["victim_probabilities"]["reachable_top_k"]
     ):
         raise ValueError("preparation director dataset declaration differs from files")
 

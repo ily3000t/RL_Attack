@@ -27,15 +27,19 @@ from rl_attack.attacks.strong.stfa.temporal import (
 )
 from rl_attack.core.artifacts import state_dict_sha256
 from rl_attack.training.stfa_director import (
+    STFA_DIRECTOR_DATASET_BINDING_V2,
+    STFA_DIRECTOR_SOFTMAX_FEATURE_SOURCE,
     STFADirector,
     STFADirectorConfig,
     STFADirectorTrainConfig,
     STFADirectorTrainingBatch,
     STFADirectorTrainingResult,
     load_stfa_director,
+    reachable_action_mask,
     save_stfa_director,
     stfa_director_manifest_path,
     train_stfa_director,
+    validate_director_dataset_binding,
 )
 from rl_attack.training.stfa_safety_critic import (
     STFASafetyCritic,
@@ -127,6 +131,23 @@ def _dataset_binding() -> dict[str, object]:
     }
 
 
+def _dataset_binding_v2(
+    critic: STFASafetyCritic, *, reachable_top_k: int = 3
+) -> dict[str, object]:
+    return {
+        **_dataset_binding(),
+        "schema_version": STFA_DIRECTOR_DATASET_BINDING_V2,
+        "safety_critic_state_sha256": state_dict_sha256(
+            critic.state_dict()
+        ),
+        "victim_probability_source": (
+            STFA_DIRECTOR_SOFTMAX_FEATURE_SOURCE
+        ),
+        "victim_probability_contract_sha256": "0" * 64,
+        "reachable_top_k": reachable_top_k,
+    }
+
+
 def _batch() -> STFADirectorTrainingBatch:
     generator = torch.Generator().manual_seed(91)
     size = 8
@@ -174,6 +195,124 @@ def test_director_config_rejects_non_integer_dimensions(
     arguments[field] = value
     with pytest.raises((TypeError, ValueError)):
         STFADirectorConfig(**arguments)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("top_k", [True, 0, -1, 5, 1.5])
+def test_director_config_rejects_invalid_reachable_top_k(
+    top_k: object,
+) -> None:
+    with pytest.raises((TypeError, ValueError)):
+        STFADirectorConfig(
+            observation_shape=(2,),
+            n_actions=5,
+            reachable_top_k=top_k,  # type: ignore[arg-type]
+        )
+
+
+def test_reachable_action_mask_is_deterministic_and_excludes_clean() -> None:
+    probabilities = np.asarray([0.30, 0.30, 0.10, 0.20, 0.10])
+    available = np.asarray([True, True, True, True, True])
+
+    top_two = reachable_action_mask(
+        probabilities,
+        clean_action=0,
+        available_action_mask=available,
+        top_k=2,
+    )
+    assert top_two.tolist() == [False, True, False, True, False]
+    assert top_two.flags.writeable is False
+
+    available[1] = False
+    masked = reachable_action_mask(
+        probabilities,
+        clean_action=0,
+        available_action_mask=available,
+        top_k=2,
+    )
+    assert masked.tolist() == [False, False, True, True, False]
+
+    legacy = reachable_action_mask(
+        probabilities,
+        clean_action=0,
+        available_action_mask=np.ones(5, dtype=np.bool_),
+        top_k=None,
+    )
+    assert legacy.tolist() == [False, True, True, True, True]
+
+
+def test_reachable_action_mask_rejects_ambiguous_inputs() -> None:
+    probabilities = np.full(5, 0.2)
+    with pytest.raises(TypeError, match="strict boolean"):
+        reachable_action_mask(
+            probabilities,
+            clean_action=0,
+            available_action_mask=np.ones(5, dtype=np.int64),
+            top_k=2,
+        )
+    with pytest.raises(ValueError, match="probability vector"):
+        reachable_action_mask(
+            np.asarray([0.5, 0.5, 0.0, 0.0, 0.1]),
+            clean_action=0,
+            available_action_mask=np.ones(5, dtype=np.bool_),
+            top_k=2,
+        )
+    with pytest.raises(ValueError, match="clean_action must be available"):
+        reachable_action_mask(
+            probabilities,
+            clean_action=0,
+            available_action_mask=np.asarray(
+                [False, True, True, True, True]
+            ),
+            top_k=2,
+        )
+
+
+def test_v2_dataset_binding_requires_softmax_contract_and_top_k() -> None:
+    critic = _safety_critic()
+    dataset = _dataset_binding_v2(critic)
+    validated = validate_director_dataset_binding(
+        dataset,
+        victim_provenance=_victim(),
+        critic_binding=_binding(critic),
+        action_ontology_sha256=highway_5_factorization().ontology_hash,
+    )
+    assert validated["victim_probability_source"] == (
+        STFA_DIRECTOR_SOFTMAX_FEATURE_SOURCE
+    )
+    assert validated["reachable_top_k"] == 3
+
+    wrong_source = {
+        **dataset,
+        "victim_probability_source": "frozen_sb3_ppo_argmax_one_hot",
+    }
+    with pytest.raises(ValueError, match="probability source"):
+        validate_director_dataset_binding(
+            wrong_source,
+            victim_provenance=_victim(),
+            critic_binding=_binding(critic),
+            action_ontology_sha256=highway_5_factorization().ontology_hash,
+        )
+
+
+def test_training_rejects_v2_top_k_config_binding_mismatch() -> None:
+    critic = _safety_critic()
+    with pytest.raises(ValueError, match="reachable_top_k differs"):
+        train_stfa_director(
+            _batch(),
+            factorization=highway_5_factorization(),
+            victim_provenance=_victim(),
+            critic_binding=_binding(critic),
+            dataset_binding=_dataset_binding_v2(
+                critic, reachable_top_k=3
+            ),
+            config=STFADirectorConfig(
+                observation_shape=(2,),
+                n_actions=5,
+                hidden_sizes=(16,),
+                reachable_top_k=2,
+            ),
+            safety_critic=critic,
+        )
 
 
 @pytest.mark.parametrize("seed", [True, 0.0])
@@ -367,6 +506,58 @@ def test_sparse_factor_heads_decode_only_a_legal_pair() -> None:
         )
         == decision.target_action
     )
+
+
+def test_director_restricts_targets_to_victim_softmax_top_k() -> None:
+    factorization = highway_5_factorization()
+    director = STFADirector(
+        STFADirectorConfig(
+            observation_shape=(2,),
+            n_actions=5,
+            hidden_sizes=(16,),
+            selection_threshold=0.0,
+            reachable_top_k=2,
+        ),
+        factorization,
+    )
+    with torch.no_grad():
+        for parameter in director.parameters():
+            parameter.zero_()
+    director.eval()
+    for parameter in director.parameters():
+        parameter.requires_grad_(False)
+
+    decision = director.decide(
+        _context(),
+        np.random.default_rng(4),
+        victim_probabilities=np.asarray(
+            [0.01, 0.50, 0.30, 0.15, 0.04]
+        ),
+        safety_costs=np.zeros(5),
+    )
+
+    assert decision.selected is True
+    assert decision.target_action == 2
+    assert decision.metadata["candidate_filter"] == (
+        "victim_softmax_top_k_nonclean"
+    )
+    assert decision.metadata["reachable_top_k"] == 2
+    assert decision.metadata["reachable_candidate_actions"] == [2, 3]
+    assert decision.metadata["valid_alternative_count"] == 2
+
+
+def test_reachability_filter_requires_explicit_runtime_probabilities() -> None:
+    director = STFADirector(
+        STFADirectorConfig(
+            observation_shape=(2,),
+            n_actions=5,
+            hidden_sizes=(8,),
+            reachable_top_k=2,
+        ),
+        highway_5_factorization(),
+    )
+    with pytest.raises(ValueError, match="victim_probabilities are required"):
+        director.decide(_context(), np.random.default_rng(7))
 
 
 def test_decide_accepts_unbatched_action_vector_tensor_and_numpy_inputs() -> None:

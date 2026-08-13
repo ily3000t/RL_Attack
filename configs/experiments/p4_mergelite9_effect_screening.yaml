@@ -1,7 +1,7 @@
 # Non-formal P4 effect gate. MergeLite9 is not SUMO and this one-model-seed
 # screen cannot establish formal robustness or authorize P5 directly.
-schema_version: rl_attack.p4_mergelite9_effect_protocol.v1
-name: p4_mergelite9_stfa_effect_screening
+schema_version: rl_attack.p4_mergelite9_effect_protocol.v2
+name: p4_mergelite9_stfa_effect_screening_v2a
 seed_registry_version: p4-mergelite9-effect-seeds-v1
 resources:
   torch_threads: 1
@@ -36,5 +36,6 @@ attack:
     window_k: 2
   steps: 20
   restarts: 5
+  reachable_top_k: 3
   validation_episodes: 50
   audit_episodes: 50

@@ -43,9 +43,13 @@ from rl_attack.training.robust_sarsa import (
     sb3_policy_state_sha256,
 )
 from rl_attack.training.stfa_director import (
+    STFA_DIRECTOR_DATASET_BINDING_V1,
+    STFA_DIRECTOR_DATASET_BINDING_V2,
+    STFA_DIRECTOR_SOFTMAX_FEATURE_SOURCE,
     STFADirectorConfig,
     STFADirectorTrainConfig,
     STFADirectorTrainingBatch,
+    reachable_action_mask,
     save_stfa_director,
     stfa_director_manifest_path,
     train_stfa_director,
@@ -64,7 +68,13 @@ CRITIC_DATASET_SCHEMA = "rl_attack.p4_stfa_critic_dataset.v1"
 DIRECTOR_DATASET_SCHEMA = "rl_attack.p4_stfa_director_dataset.v1"
 CRITIC_DATASET_MANIFEST_SCHEMA = "rl_attack.p4_stfa_critic_dataset_manifest.v1"
 DIRECTOR_DATASET_MANIFEST_SCHEMA = "rl_attack.p4_stfa_director_dataset_manifest.v1"
+DIRECTOR_DATASET_MANIFEST_SCHEMA_V2 = "rl_attack.p4_stfa_director_dataset_manifest.v2"
 RUN_MANIFEST_SCHEMA = "rl_attack.p4_stfa_dataset_training.v1"
+
+DIRECTOR_VICTIM_PROBABILITY_SOURCE = STFA_DIRECTOR_SOFTMAX_FEATURE_SOURCE
+DIRECTOR_REACHABILITY_RULE = (
+    "top_k_available_nonclean_by_descending_probability_then_action_index"
+)
 
 _FACTOR_FIELDS = frozenset(
     {
@@ -673,11 +683,19 @@ def _validate_director_sidecar(
     factorization: ActionFactorization,
     observation_shape: tuple[int, ...],
 ) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError("dataset sidecar must be a JSON object")
+    schema = value.get("schema_version")
+    if schema not in {
+        DIRECTOR_DATASET_MANIFEST_SCHEMA,
+        DIRECTOR_DATASET_MANIFEST_SCHEMA_V2,
+    }:
+        raise ValueError("unsupported STFA director dataset sidecar schema")
     result = _validate_sidecar_common(
         value,
         source=source,
         dataset_sha256=dataset_sha256,
-        schema=DIRECTOR_DATASET_MANIFEST_SCHEMA,
+        schema=schema,
         artifact_type="stfa_director_dataset",
         factorization=factorization,
         observation_shape=observation_shape,
@@ -695,6 +713,8 @@ def _validate_director_sidecar(
             "horizon",
             "labeler",
     }
+    if schema == DIRECTOR_DATASET_MANIFEST_SCHEMA_V2:
+        required_fields.add("victim_probabilities")
     optional_fields = {"p4_runtime_environment_contract_sha256"}
     missing = required_fields - set(result)
     extra = set(result) - required_fields - optional_fields
@@ -711,6 +731,35 @@ def _validate_director_sidecar(
     result["collector_version"] = _nonempty_string(
         result["collector_version"], name="collector_version"
     )
+    if schema == DIRECTOR_DATASET_MANIFEST_SCHEMA_V2:
+        probability_contract = result["victim_probabilities"]
+        if not isinstance(probability_contract, Mapping):
+            raise ValueError("victim_probabilities must be a JSON object")
+        probability_contract = dict(probability_contract)
+        _strict_keys(
+            probability_contract,
+            required={"source", "temperature", "candidate_rule", "reachable_top_k"},
+            name="director victim_probabilities",
+        )
+        reachable_top_k = _strict_integer(
+            probability_contract["reachable_top_k"],
+            name="victim_probabilities.reachable_top_k",
+            minimum=1,
+        )
+        if reachable_top_k >= factorization.n_actions:
+            raise ValueError("reachable_top_k must be smaller than the action count")
+        temperature = probability_contract["temperature"]
+        if (
+            probability_contract["source"] != DIRECTOR_VICTIM_PROBABILITY_SOURCE
+            or isinstance(temperature, bool)
+            or not isinstance(temperature, (int, float))
+            or float(temperature) != 1.0
+            or probability_contract["candidate_rule"] != DIRECTOR_REACHABILITY_RULE
+        ):
+            raise ValueError("director victim-probability/reachability contract is invalid")
+        probability_contract["temperature"] = 1.0
+        probability_contract["reachable_top_k"] = reachable_top_k
+        result["victim_probabilities"] = probability_contract
     critic = result["safety_critic"]
     if not isinstance(critic, Mapping):
         raise ValueError("director dataset safety_critic must be a JSON object")
@@ -752,6 +801,20 @@ def _validate_director_sidecar(
         raise ValueError("labeler rules and config must be JSON objects")
     labeler["rules"] = dict(labeler["rules"])
     labeler["config"] = dict(labeler["config"])
+    if schema == DIRECTOR_DATASET_MANIFEST_SCHEMA_V2:
+        probability_contract = result["victim_probabilities"]
+        if (
+            labeler["config"].get("victim_probability_source")
+            != probability_contract["source"]
+            or labeler["config"].get("reachable_top_k")
+            != probability_contract["reachable_top_k"]
+            or labeler["config"].get("reachability_rule")
+            != probability_contract["candidate_rule"]
+        ):
+            raise ValueError(
+                "director labeler reachability settings differ from the "
+                "authoritative probability contract"
+            )
     expected_labeler_hash = canonical_json_sha256(
         {
             "name": labeler["name"],
@@ -765,6 +828,20 @@ def _validate_director_sidecar(
     result["labeler"] = labeler
     canonical_json_sha256(result)
     return result
+
+
+def _director_probability_source(provenance: Mapping[str, Any]) -> str:
+    """Resolve only schema-owned probability semantics; sidecars cannot choose code."""
+
+    if provenance["schema_version"] == DIRECTOR_DATASET_MANIFEST_SCHEMA_V2:
+        contract = provenance["victim_probabilities"]
+        if contract["source"] != DIRECTOR_VICTIM_PROBABILITY_SOURCE:
+            raise ValueError("director probability source escaped the validated v2 contract")
+        return DIRECTOR_VICTIM_PROBABILITY_SOURCE
+    return {
+        "stochastic": "frozen_sb3_ppo_categorical_probabilities",
+        "deterministic": "frozen_sb3_ppo_argmax_one_hot",
+    }[provenance["victim"]["action_mode"]]
 
 
 def _scalar_string(arrays: Mapping[str, np.ndarray], name: str) -> str:
@@ -1011,6 +1088,29 @@ def load_director_dataset(
         factorization=factorization,
         observation_shape=tuple(observations.shape[1:]),
     )
+    if provenance["schema_version"] == DIRECTOR_DATASET_MANIFEST_SCHEMA_V2:
+        probability_contract = provenance["victim_probabilities"]
+        reachable_top_k = int(probability_contract["reachable_top_k"])
+        static_availability = np.asarray(factorization.availability, dtype=np.bool_)
+        recorded_masks = batch.available_action_masks.numpy()
+        probabilities = batch.victim_probabilities.numpy()
+        expected_masks = np.stack(
+            [
+                reachable_action_mask(
+                    row,
+                    clean_action=int(np.argmax(row)),
+                    available_action_mask=static_availability,
+                    top_k=reachable_top_k,
+                )
+                for row in probabilities
+            ],
+            axis=0,
+        )
+        if not np.array_equal(recorded_masks, expected_masks):
+            raise ValueError(
+                "director available_action_masks do not match the declared "
+                "softmax reachable-top-k contract"
+            )
     runtime_environment_sha256, verification_source = (
         _verified_runtime_environment_contract(
             provenance,
@@ -1195,17 +1295,30 @@ def _validate_dataset_victim_binding(
 def _victim_probabilities(
     victim: FrozenVictim,
     observations: torch.Tensor,
+    *,
+    probability_source: str | None = None,
 ) -> np.ndarray:
     adapter = SB3CategoricalPolicyAdapter(victim.model)
     tensor = observations.to(adapter.device, dtype=torch.float32)
     with torch.no_grad():
         logits = adapter.logits(tensor)
         probabilities = torch.softmax(logits, dim=-1)
-        if victim.action_mode == "deterministic":
+        resolved_source = probability_source
+        if resolved_source is None:
+            resolved_source = {
+                "stochastic": "frozen_sb3_ppo_categorical_probabilities",
+                "deterministic": "frozen_sb3_ppo_argmax_one_hot",
+            }[victim.action_mode]
+        if resolved_source == "frozen_sb3_ppo_argmax_one_hot":
             indices = torch.argmax(probabilities, dim=-1)
             probabilities = torch.nn.functional.one_hot(
                 indices, num_classes=probabilities.shape[1]
             ).to(dtype=torch.float32)
+        elif resolved_source not in {
+            "frozen_sb3_ppo_categorical_probabilities",
+            DIRECTOR_VICTIM_PROBABILITY_SOURCE,
+        }:
+            raise ValueError("unsupported trusted PPO probability source")
     result = probabilities.detach().cpu().numpy().astype(np.float32, copy=False)
     if not np.all(np.isfinite(result)):
         raise FloatingPointError("PPO victim produced non-finite probabilities")
@@ -1301,8 +1414,12 @@ def _director_dataset_binding(
     critic_binding: Mapping[str, Any],
 ) -> dict[str, Any]:
     provenance = dataset.provenance
-    return {
-        "schema_version": "p4-stfa-director-dataset-binding-v1",
+    probability_source = _director_probability_source(provenance)
+    collector_contract: dict[str, Any] = {
+        "collector_version": provenance["collector_version"]
+    }
+    result: dict[str, Any] = {
+        "schema_version": STFA_DIRECTOR_DATASET_BINDING_V1,
         "dataset_sha256": dataset.file_sha256,
         "dataset_manifest_sha256": dataset.manifest_sha256,
         "provenance_sha256": canonical_json_sha256(provenance),
@@ -1312,9 +1429,7 @@ def _director_dataset_binding(
         "normalization_contract_sha256": provenance["environment"]["observation_space"][
             "normalization"
         ]["sha256"],
-        "collector_contract_sha256": canonical_json_sha256(
-            {"collector_version": provenance["collector_version"]}
-        ),
+        "collector_contract_sha256": "",
         "action_ontology_sha256": dataset.factorization.ontology_hash,
         "victim_checkpoint_sha256": victim.checkpoint_sha256,
         "victim_policy_state_sha256": victim.policy_state_sha256,
@@ -1327,6 +1442,21 @@ def _director_dataset_binding(
         "victim_probabilities_recomputed": True,
         "safety_costs_recomputed": True,
     }
+    if provenance["schema_version"] == DIRECTOR_DATASET_MANIFEST_SCHEMA_V2:
+        probability_contract = dict(provenance["victim_probabilities"])
+        collector_contract["victim_probabilities"] = probability_contract
+        result.update(
+            {
+                "schema_version": STFA_DIRECTOR_DATASET_BINDING_V2,
+                "victim_probability_source": probability_source,
+                "victim_probability_contract_sha256": canonical_json_sha256(
+                    probability_contract
+                ),
+                "reachable_top_k": probability_contract["reachable_top_k"],
+            }
+        )
+    result["collector_contract_sha256"] = canonical_json_sha256(collector_contract)
+    return result
 
 
 def _factorization_record(value: ActionFactorization) -> dict[str, Any]:
@@ -1645,6 +1775,12 @@ def train_director_from_npz(
         STFADirectorConfig(
             observation_shape=tuple(dataset.batch.observations.shape[1:]),
             n_actions=dataset.factorization.n_actions,
+            reachable_top_k=(
+                int(dataset.provenance["victim_probabilities"]["reachable_top_k"])
+                if dataset.provenance["schema_version"]
+                == DIRECTOR_DATASET_MANIFEST_SCHEMA_V2
+                else None
+            ),
         )
         if config is None
         else config
@@ -1694,7 +1830,12 @@ def train_director_from_npz(
         "space_sha256": critic_manifest["space"]["sha256"],
     }:
         raise ValueError("director dataset sidecar is bound to a different safety critic")
-    recomputed_probabilities = _victim_probabilities(victim, dataset.batch.observations)
+    probability_source = _director_probability_source(dataset.provenance)
+    recomputed_probabilities = _victim_probabilities(
+        victim,
+        dataset.batch.observations,
+        probability_source=probability_source,
+    )
     probability_error = _require_close(
         dataset.batch.victim_probabilities,
         recomputed_probabilities,
@@ -1814,7 +1955,10 @@ __all__ = [
     "CriticDataset",
     "DIRECTOR_DATASET_FIELDS",
     "DIRECTOR_DATASET_MANIFEST_SCHEMA",
+    "DIRECTOR_DATASET_MANIFEST_SCHEMA_V2",
     "DIRECTOR_DATASET_SCHEMA",
+    "DIRECTOR_REACHABILITY_RULE",
+    "DIRECTOR_VICTIM_PROBABILITY_SOURCE",
     "DirectorDataset",
     "FrozenVictim",
     "RUN_MANIFEST_SCHEMA",

@@ -166,6 +166,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         activation=args.activation,
         selection_threshold=args.selection_threshold,
         stochastic_inference=args.stochastic_inference,
+        reachable_top_k=(
+            int(dataset.provenance["victim_probabilities"]["reachable_top_k"])
+            if "victim_probabilities" in dataset.provenance
+            else None
+        ),
     )
     train_config = STFADirectorTrainConfig(
         gradient_steps=args.gradient_steps,
