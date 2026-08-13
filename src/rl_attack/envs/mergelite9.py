@@ -60,9 +60,18 @@ MERGELITE9_IMMUTABLE_SENSOR_INDICES = (
     MERGELITE9_ROUTE_PROGRESS_INDEX,
     MERGELITE9_MERGE_URGENCY_INDEX,
 )
-MERGELITE9_PROJECTOR_NAME = "mergelite9_semantic_sensor_v1"
-MERGELITE9_PROJECTOR_VERSION = "mergelite9-sensor-attack-v1"
-MERGELITE9_PROJECTOR_CONFIG_SCHEMA = "rl_attack.p4_mergelite9_projector.v1"
+MERGELITE9_PROJECTOR_NAME_V1 = "mergelite9_semantic_sensor_v1"
+MERGELITE9_PROJECTOR_VERSION_V1 = "mergelite9-sensor-attack-v1"
+MERGELITE9_PROJECTOR_CONFIG_SCHEMA_V1 = "rl_attack.p4_mergelite9_projector.v1"
+MERGELITE9_PROJECTOR_NAME_V2 = "mergelite9_semantic_sensor_v2"
+MERGELITE9_PROJECTOR_VERSION_V2 = "mergelite9-sensor-attack-v2"
+MERGELITE9_PROJECTOR_CONFIG_SCHEMA_V2 = "rl_attack.p4_mergelite9_projector.v2"
+
+# Compatibility aliases deliberately retain the v1 identity.  Call
+# ``mergelite9_threat_contract_for_ratio`` when creating a new preparation.
+MERGELITE9_PROJECTOR_NAME = MERGELITE9_PROJECTOR_NAME_V1
+MERGELITE9_PROJECTOR_VERSION = MERGELITE9_PROJECTOR_VERSION_V1
+MERGELITE9_PROJECTOR_CONFIG_SCHEMA = MERGELITE9_PROJECTOR_CONFIG_SCHEMA_V1
 MERGELITE9_SENSOR_BASE_SCALE = 0.05
 MERGELITE9_SENSOR_BASE_EPSILON = np.asarray(
     [0.0, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.0],
@@ -100,10 +109,10 @@ def _canonical_sha256(value: object) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-_sensor_attack_payload = {
+_sensor_attack_payload_v1 = {
     "schema_version": "rl_attack.mergelite9_sensor_attack_contract.v1",
-    "name": MERGELITE9_PROJECTOR_NAME,
-    "contract_version": MERGELITE9_PROJECTOR_VERSION,
+    "name": MERGELITE9_PROJECTOR_NAME_V1,
+    "contract_version": MERGELITE9_PROJECTOR_VERSION_V1,
     "feature_names": list(MERGELITE9_OBSERVATION_NAMES),
     "base_scale": MERGELITE9_SENSOR_BASE_SCALE,
     "base_epsilon": [0.0, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.0],
@@ -123,26 +132,127 @@ _sensor_attack_payload = {
     ],
     "guarantee": "bounded_policy_sensor_attack_not_physical_realizability",
 }
-MERGELITE9_SENSOR_ATTACK_CONTRACT: dict[str, Any] = {
-    **_sensor_attack_payload,
-    "sha256": _canonical_sha256(_sensor_attack_payload),
+MERGELITE9_SENSOR_ATTACK_CONTRACT_V1: dict[str, Any] = {
+    **_sensor_attack_payload_v1,
+    "sha256": _canonical_sha256(_sensor_attack_payload_v1),
 }
-MERGELITE9_SENSOR_ATTACK_CONTRACT_SHA256 = MERGELITE9_SENSOR_ATTACK_CONTRACT["sha256"]
+MERGELITE9_SENSOR_ATTACK_CONTRACT_SHA256_V1 = (
+    MERGELITE9_SENSOR_ATTACK_CONTRACT_V1["sha256"]
+)
+
+_sensor_attack_payload_v2 = {
+    "schema_version": "rl_attack.mergelite9_sensor_attack_contract.v2",
+    "name": MERGELITE9_PROJECTOR_NAME_V2,
+    "contract_version": MERGELITE9_PROJECTOR_VERSION_V2,
+    "feature_names": list(MERGELITE9_OBSERVATION_NAMES),
+    "base_scale": MERGELITE9_SENSOR_BASE_SCALE,
+    "base_epsilon": [0.0, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.0],
+    "epsilon_rule": "feature_epsilon=base_epsilon*epsilon_ratio",
+    "epsilon_ratio_rule": "finite_non_negative",
+    "effective_epsilon_interval": [0.0, 1.0],
+    "effective_epsilon_validation": "each_feature_before_float32_cast",
+    "lower": MERGELITE9_OBSERVATION_LOW.tolist(),
+    "upper": MERGELITE9_OBSERVATION_HIGH.tolist(),
+    "immutable_indices": list(MERGELITE9_IMMUTABLE_SENSOR_INDICES),
+    "deterministic_couplings": [
+        {
+            "source_index": MERGELITE9_ROUTE_PROGRESS_INDEX,
+            "dependent_index": MERGELITE9_MERGE_URGENCY_INDEX,
+            "relation": ("u=2*clip(((0.5*(route_progress+1)*160)-18)/(105-18),0,1)-1"),
+            "clean_float32_relation": "exact",
+            "both_features_immutable": True,
+        }
+    ],
+    "guarantee": "bounded_policy_sensor_attack_not_physical_realizability",
+}
+MERGELITE9_SENSOR_ATTACK_CONTRACT_V2: dict[str, Any] = {
+    **_sensor_attack_payload_v2,
+    "sha256": _canonical_sha256(_sensor_attack_payload_v2),
+}
+MERGELITE9_SENSOR_ATTACK_CONTRACT_SHA256_V2 = (
+    MERGELITE9_SENSOR_ATTACK_CONTRACT_V2["sha256"]
+)
+MERGELITE9_SENSOR_ATTACK_CONTRACT = MERGELITE9_SENSOR_ATTACK_CONTRACT_V1
+MERGELITE9_SENSOR_ATTACK_CONTRACT_SHA256 = (
+    MERGELITE9_SENSOR_ATTACK_CONTRACT_SHA256_V1
+)
 
 
-def mergelite9_feature_epsilon(epsilon_ratio: float) -> NDArray[np.float32]:
+def mergelite9_sensor_attack_contract(
+    contract_version: str,
+) -> tuple[str, str, dict[str, Any]]:
+    """Return the exact schema, projector name, and sensor contract for a version."""
+
+    if contract_version == MERGELITE9_PROJECTOR_VERSION_V1:
+        return (
+            MERGELITE9_PROJECTOR_CONFIG_SCHEMA_V1,
+            MERGELITE9_PROJECTOR_NAME_V1,
+            MERGELITE9_SENSOR_ATTACK_CONTRACT_V1,
+        )
+    if contract_version == MERGELITE9_PROJECTOR_VERSION_V2:
+        return (
+            MERGELITE9_PROJECTOR_CONFIG_SCHEMA_V2,
+            MERGELITE9_PROJECTOR_NAME_V2,
+            MERGELITE9_SENSOR_ATTACK_CONTRACT_V2,
+        )
+    raise ValueError(f"unsupported MergeLite9 sensor attack contract: {contract_version!r}")
+
+
+def mergelite9_threat_contract_for_ratio(
+    epsilon_ratio: float,
+) -> tuple[str, str, str, dict[str, Any]]:
+    """Select the one canonical threat-contract version for a new preparation."""
+
+    if (
+        isinstance(epsilon_ratio, bool)
+        or not isinstance(epsilon_ratio, (int, float, np.integer, np.floating))
+        or not math.isfinite(float(epsilon_ratio))
+        or float(epsilon_ratio) < 0.0
+    ):
+        raise ValueError("epsilon_ratio must be a finite non-negative real number")
+    version = (
+        MERGELITE9_PROJECTOR_VERSION_V1
+        if float(epsilon_ratio) <= 1.0
+        else MERGELITE9_PROJECTOR_VERSION_V2
+    )
+    schema, name, contract = mergelite9_sensor_attack_contract(version)
+    # Validate the effective budget before exposing a contract selection.
+    mergelite9_feature_epsilon(epsilon_ratio, contract_version=version)
+    return schema, name, version, contract
+
+
+def mergelite9_feature_epsilon(
+    epsilon_ratio: float,
+    *,
+    contract_version: str = MERGELITE9_PROJECTOR_VERSION,
+) -> NDArray[np.float32]:
     """Derive exact per-feature budgets from the trusted sensor contract."""
 
     if (
         isinstance(epsilon_ratio, bool)
         or not isinstance(epsilon_ratio, (int, float, np.integer, np.floating))
         or not math.isfinite(float(epsilon_ratio))
-        or not 0.0 <= float(epsilon_ratio) <= 1.0
+        or float(epsilon_ratio) < 0.0
     ):
-        raise ValueError("epsilon_ratio must be finite and lie in [0, 1]")
-    result = (MERGELITE9_SENSOR_BASE_EPSILON * np.float32(epsilon_ratio)).astype(
-        np.float32, copy=False
-    )
+        raise ValueError("epsilon_ratio must be a finite non-negative real number")
+    _, _, sensor_contract = mergelite9_sensor_attack_contract(contract_version)
+    ratio = float(epsilon_ratio)
+    if contract_version == MERGELITE9_PROJECTOR_VERSION_V1 and ratio > 1.0:
+        raise ValueError("v1 epsilon_ratio must lie in [0, 1]")
+    effective = np.asarray(sensor_contract["base_epsilon"], dtype=np.float64) * ratio
+    if np.any(effective > 1.0):
+        raise ValueError("effective feature epsilon must lie in [0, 1]")
+    if contract_version == MERGELITE9_PROJECTOR_VERSION_V1:
+        # Preserve the exact historical float32 multiplication for every v1
+        # ratio, not just the checked 0.5 bundle.
+        result = (
+            MERGELITE9_SENSOR_BASE_EPSILON * np.float32(ratio)
+        ).astype(np.float32, copy=False)
+    else:
+        result = effective.astype(np.float32)
+    immutable = np.asarray(MERGELITE9_IMMUTABLE_SENSOR_INDICES, dtype=np.intp)
+    if np.any(result[immutable] != np.float32(0.0)):
+        raise RuntimeError("immutable MergeLite9 sensor epsilon must remain zero")
     result.setflags(write=False)
     return result
 
@@ -340,17 +450,30 @@ def _safety_cost(
 class MergeLite9Projector(PolicyInputProjector):
     """Exact sensor-contract projector for the MergeLite9 policy input."""
 
-    def __init__(self, *, epsilon_ratio: float) -> None:
-        epsilon = mergelite9_feature_epsilon(epsilon_ratio)
+    def __init__(
+        self,
+        *,
+        epsilon_ratio: float,
+        contract_version: str = MERGELITE9_PROJECTOR_VERSION,
+    ) -> None:
+        _, projector_name, sensor_contract = mergelite9_sensor_attack_contract(
+            contract_version
+        )
+        epsilon = mergelite9_feature_epsilon(
+            epsilon_ratio,
+            contract_version=contract_version,
+        )
         super().__init__(
             observation_shape=MERGELITE9_OBSERVATION_SHAPE,
             epsilon=epsilon,
             lower=MERGELITE9_OBSERVATION_LOW,
             upper=MERGELITE9_OBSERVATION_HIGH,
             mutable_mask=epsilon > np.float32(0.0),
-            name=MERGELITE9_PROJECTOR_NAME,
+            name=projector_name,
         )
         self.epsilon_ratio = float(epsilon_ratio)
+        self.contract_version = contract_version
+        self.sensor_attack_contract_sha256 = str(sensor_contract["sha256"])
 
     @staticmethod
     def _validate_progress_coupling(observation: NDArray[np.float32]) -> None:
@@ -390,8 +513,10 @@ class MergeLite9Projector(PolicyInputProjector):
             schema_consistent=True,
             metadata={
                 "projector": self.name,
-                "contract_version": MERGELITE9_PROJECTOR_VERSION,
-                "sensor_attack_contract_sha256": (MERGELITE9_SENSOR_ATTACK_CONTRACT_SHA256),
+                "contract_version": self.contract_version,
+                "sensor_attack_contract_sha256": (
+                    self.sensor_attack_contract_sha256
+                ),
                 "epsilon_ratio": self.epsilon_ratio,
                 "base_epsilon": MERGELITE9_SENSOR_BASE_EPSILON.tolist(),
                 "policy_input_epsilon": self.epsilon.tolist(),
@@ -754,14 +879,24 @@ __all__ = [
     "MERGELITE9_IMMUTABLE_SENSOR_INDICES",
     "MERGELITE9_MERGE_URGENCY_INDEX",
     "MERGELITE9_PROJECTOR_CONFIG_SCHEMA",
+    "MERGELITE9_PROJECTOR_CONFIG_SCHEMA_V1",
+    "MERGELITE9_PROJECTOR_CONFIG_SCHEMA_V2",
     "MERGELITE9_PROJECTOR_NAME",
+    "MERGELITE9_PROJECTOR_NAME_V1",
+    "MERGELITE9_PROJECTOR_NAME_V2",
     "MERGELITE9_PROJECTOR_VERSION",
+    "MERGELITE9_PROJECTOR_VERSION_V1",
+    "MERGELITE9_PROJECTOR_VERSION_V2",
     "MERGELITE9_REGISTRY_KEY",
     "MERGELITE9_ROUTE_PROGRESS_INDEX",
     "MERGELITE9_RUNTIME_TYPE",
     "MERGELITE9_SAFETY_COST_DEFINITION_SHA256",
     "MERGELITE9_SENSOR_ATTACK_CONTRACT",
+    "MERGELITE9_SENSOR_ATTACK_CONTRACT_V1",
+    "MERGELITE9_SENSOR_ATTACK_CONTRACT_V2",
     "MERGELITE9_SENSOR_ATTACK_CONTRACT_SHA256",
+    "MERGELITE9_SENSOR_ATTACK_CONTRACT_SHA256_V1",
+    "MERGELITE9_SENSOR_ATTACK_CONTRACT_SHA256_V2",
     "MERGELITE9_SENSOR_BASE_EPSILON",
     "MERGELITE9_SENSOR_BASE_SCALE",
     "MERGELITE9_VERSION",
@@ -773,4 +908,6 @@ __all__ = [
     "mergelite9_factorization",
     "mergelite9_expected_merge_urgency",
     "mergelite9_feature_epsilon",
+    "mergelite9_sensor_attack_contract",
+    "mergelite9_threat_contract_for_ratio",
 ]

@@ -21,13 +21,18 @@ from rl_attack.envs.mergelite9 import (
     MERGELITE9_NORMALIZATION_CONTRACT_SHA256,
     MERGELITE9_OBSERVATION_SHAPE,
     MERGELITE9_PROJECTOR_CONFIG_SCHEMA,
+    MERGELITE9_PROJECTOR_CONFIG_SCHEMA_V2,
     MERGELITE9_PROJECTOR_NAME,
+    MERGELITE9_PROJECTOR_NAME_V2,
     MERGELITE9_PROJECTOR_VERSION,
+    MERGELITE9_PROJECTOR_VERSION_V1,
+    MERGELITE9_PROJECTOR_VERSION_V2,
     MERGELITE9_REGISTRY_KEY,
     MERGELITE9_RUNTIME_TYPE,
     MERGELITE9_SAFETY_COST_DEFINITION_SHA256,
     MERGELITE9_SENSOR_ATTACK_CONTRACT,
     MERGELITE9_SENSOR_ATTACK_CONTRACT_SHA256,
+    MERGELITE9_SENSOR_ATTACK_CONTRACT_V2,
     MERGELITE9_SENSOR_BASE_EPSILON,
     MergeLite9Env,
     MergeLite9Projector,
@@ -36,6 +41,7 @@ from rl_attack.envs.mergelite9 import (
     mergelite9_expected_merge_urgency,
     mergelite9_factorization,
     mergelite9_feature_epsilon,
+    mergelite9_threat_contract_for_ratio,
 )
 from rl_attack.experiments.p4_audit import (
     P4_MERGELITE_ENVIRONMENT_REGISTRY,
@@ -174,6 +180,74 @@ def test_dedicated_projector_freezes_coupling_and_uses_feature_budgets() -> None
         projector.project(invalid_clean, candidate)
 
 
+def test_v2_projector_accepts_ratio_six_and_caps_effective_epsilon() -> None:
+    schema, name, version, sensor_contract = mergelite9_threat_contract_for_ratio(6)
+    assert schema == MERGELITE9_PROJECTOR_CONFIG_SCHEMA_V2
+    assert name == MERGELITE9_PROJECTOR_NAME_V2
+    assert version == MERGELITE9_PROJECTOR_VERSION_V2
+    assert sensor_contract == MERGELITE9_SENSOR_ATTACK_CONTRACT_V2
+    expected = np.asarray(
+        [0.0, 0.3, 0.3, 0.3, 0.3, 0.3, 0.3, 0.0],
+        dtype=np.float32,
+    )
+    epsilon = mergelite9_feature_epsilon(6, contract_version=version)
+    np.testing.assert_array_equal(epsilon, expected)
+    assert not epsilon.flags.writeable
+    projector = MergeLite9Projector(epsilon_ratio=6, contract_version=version)
+    np.testing.assert_array_equal(projector.epsilon, expected)
+    assert projector.name == name
+    assert projector.contract_version == version
+
+
+@pytest.mark.parametrize("ratio", [0.1, 0.3, 0.5, 1.0])
+def test_v1_feature_epsilon_preserves_historical_float32_arithmetic(
+    ratio: float,
+) -> None:
+    expected = (
+        MERGELITE9_SENSOR_BASE_EPSILON * np.float32(ratio)
+    ).astype(np.float32, copy=False)
+    np.testing.assert_array_equal(mergelite9_feature_epsilon(ratio), expected)
+
+
+@pytest.mark.parametrize(
+    "invalid_ratio",
+    [True, np.bool_(False), -1, float("nan"), float("inf"), -float("inf")],
+)
+def test_epsilon_ratio_rejects_non_real_non_finite_or_negative(
+    invalid_ratio: object,
+) -> None:
+    with pytest.raises(ValueError, match="finite non-negative"):
+        mergelite9_feature_epsilon(invalid_ratio)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="finite non-negative"):
+        mergelite9_threat_contract_for_ratio(invalid_ratio)  # type: ignore[arg-type]
+
+
+def test_v2_epsilon_fails_closed_only_after_effective_cap() -> None:
+    expected = np.asarray(
+        [0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0],
+        dtype=np.float32,
+    )
+    np.testing.assert_array_equal(
+        mergelite9_feature_epsilon(
+            20,
+            contract_version=MERGELITE9_PROJECTOR_VERSION_V2,
+        ),
+        expected,
+    )
+    with pytest.raises(ValueError, match="effective feature epsilon"):
+        mergelite9_feature_epsilon(
+            20.000001,
+            contract_version=MERGELITE9_PROJECTOR_VERSION_V2,
+        )
+    with pytest.raises(ValueError, match="effective feature epsilon"):
+        mergelite9_threat_contract_for_ratio(21)
+    with pytest.raises(ValueError, match="v1 epsilon_ratio"):
+        mergelite9_feature_epsilon(
+            6,
+            contract_version=MERGELITE9_PROJECTOR_VERSION_V1,
+        )
+
+
 def test_p4_mergelite_projector_factory_is_registry_bound_and_tamper_evident(
     tmp_path: Path,
 ) -> None:
@@ -227,6 +301,61 @@ def test_p4_mergelite_projector_factory_is_registry_bound_and_tamper_evident(
                     context,
                     config_sha256=sha256_file(config_path),
                 )
+            )
+    finally:
+        env.close()
+
+
+def test_p4_mergelite_v2_projector_factory_is_strict_and_ratio_six_capable(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "projector-v2.yaml"
+    payload = {
+        "schema_version": MERGELITE9_PROJECTOR_CONFIG_SCHEMA_V2,
+        "name": MERGELITE9_PROJECTOR_NAME_V2,
+        "contract_version": MERGELITE9_PROJECTOR_VERSION_V2,
+        "observation_shape": [8],
+        "epsilon_ratio": 6,
+        "sensor_contract": MERGELITE9_SENSOR_ATTACK_CONTRACT_V2,
+        "policy_input_epsilon": mergelite9_feature_epsilon(
+            6,
+            contract_version=MERGELITE9_PROJECTOR_VERSION_V2,
+        ).tolist(),
+    }
+    config_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+    env = make_mergelite9()
+    try:
+        context = ProjectorBuildContext(
+            config=SimpleNamespace(
+                environment=SimpleNamespace(registry_key=P4_MERGELITE_ENVIRONMENT_REGISTRY),
+                projector=SimpleNamespace(
+                    factory=P4_MERGELITE_PROJECTOR_FACTORY,
+                    name=MERGELITE9_PROJECTOR_NAME_V2,
+                    version=MERGELITE9_PROJECTOR_VERSION_V2,
+                    factory_kwargs={},
+                    observation_shape=(8,),
+                ),
+            ),
+            observation_space=env.observation_space,
+            config_path=config_path,
+            config_sha256=sha256_file(config_path),
+        )
+        built = build_mergelite9_projector(context)
+        assert built.contract_version == MERGELITE9_PROJECTOR_VERSION_V2
+        np.testing.assert_array_equal(
+            built.epsilon,
+            np.asarray([0.0, 0.3, 0.3, 0.3, 0.3, 0.3, 0.3, 0.0], dtype=np.float32),
+        )
+
+        mismatched = copy.deepcopy(payload)
+        mismatched["contract_version"] = MERGELITE9_PROJECTOR_VERSION_V1
+        config_path.write_text(
+            yaml.safe_dump(mismatched, sort_keys=False),
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="unsupported MergeLite9 projector"):
+            build_mergelite9_projector(
+                dataclasses.replace(context, config_sha256=sha256_file(config_path))
             )
     finally:
         env.close()

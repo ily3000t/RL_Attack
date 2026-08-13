@@ -43,6 +43,7 @@ from rl_attack.core.artifacts import (
     strict_json_write,
     validate_sha256,
 )
+from rl_attack.envs import mergelite9 as mergelite9_env
 from rl_attack.envs.mergelite9 import (
     MERGELITE9_COST_DEFINITION,
     MERGELITE9_ENVIRONMENT_ID,
@@ -50,17 +51,16 @@ from rl_attack.envs.mergelite9 import (
     MERGELITE9_MAX_EPISODE_STEPS,
     MERGELITE9_NORMALIZATION_CONTRACT,
     MERGELITE9_NORMALIZATION_CONTRACT_SHA256,
-    MERGELITE9_PROJECTOR_CONFIG_SCHEMA,
     MERGELITE9_PROJECTOR_NAME,
     MERGELITE9_PROJECTOR_VERSION,
     MERGELITE9_REGISTRY_KEY,
     MERGELITE9_RUNTIME_TYPE,
     MERGELITE9_SAFETY_COST_DEFINITION_SHA256,
-    MERGELITE9_SENSOR_ATTACK_CONTRACT,
     MERGELITE9_SENSOR_BASE_SCALE,
     make_mergelite9,
     mergelite9_factorization,
     mergelite9_feature_epsilon,
+    mergelite9_threat_contract_for_ratio,
 )
 from rl_attack.experiments.p4_audit import (
     P4_ARGMAX_MODE,
@@ -119,6 +119,9 @@ CLEAN_PROBABILITY_FLOOR = 1.0e-6
 PROBABILITY_RATIO_CEILING = 1.0
 PROJECTOR_NAME = MERGELITE9_PROJECTOR_NAME
 PROJECTOR_VERSION = MERGELITE9_PROJECTOR_VERSION
+# Retain the historical module-level v1 alias for callers and checked tests;
+# new preparations select the exact contract dynamically from their ratio.
+MERGELITE9_PROJECTOR_CONFIG_SCHEMA = mergelite9_env.MERGELITE9_PROJECTOR_CONFIG_SCHEMA
 PROJECTOR_FACTORY = P4_MERGELITE_PROJECTOR_FACTORY
 ATTACK_FACTORY = "rl_attack.experiments.p4_audit:build_stfa_attack"
 BOOTSTRAP_SEED = 546_001
@@ -198,6 +201,14 @@ CHECKED_PROTOCOL_PATH = (
 )
 
 
+def _projector_contract_for_protocol(
+    protocol: ScreeningProtocol,
+) -> tuple[str, str, str, dict[str, Any]]:
+    """Select the exact versioned sensor contract for one protocol budget."""
+
+    return mergelite9_threat_contract_for_ratio(protocol.epsilon_ratio)
+
+
 @dataclass(frozen=True)
 class ScreeningProtocol:
     name: str
@@ -233,7 +244,11 @@ class ScreeningProtocol:
 
     @property
     def feature_epsilon(self) -> np.ndarray:
-        return mergelite9_feature_epsilon(self.epsilon_ratio)
+        _, _, contract_version, _ = _projector_contract_for_protocol(self)
+        return mergelite9_feature_epsilon(
+            self.epsilon_ratio,
+            contract_version=contract_version,
+        )
 
     def __post_init__(self) -> None:
         if not self.name or self.name != self.name.strip():
@@ -287,8 +302,13 @@ class ScreeningProtocol:
             abs_tol=0.0,
         ):
             raise ValueError("epsilon_base must equal the trusted MergeLite9 sensor base scale")
-        if not 0 < self.epsilon_ratio <= 1:
-            raise ValueError("epsilon_ratio must lie in (0, 1]")
+        if self.epsilon_ratio <= 0:
+            raise ValueError("epsilon_ratio must be positive")
+        effective_epsilon = self.feature_epsilon
+        if np.any(effective_epsilon < 0.0) or np.any(effective_epsilon > 1.0):
+            raise ValueError(
+                "every effective feature epsilon must lie in [0, 1]"
+            )
         for name in (
             "admission_min_merge_success_rate",
             "admission_max_collision_rate",
@@ -1336,13 +1356,16 @@ def _write_yaml(path: Path, payload: Mapping[str, Any]) -> None:
 
 
 def _projector_config_payload(protocol: ScreeningProtocol) -> dict[str, Any]:
+    schema, name, version, sensor_contract = _projector_contract_for_protocol(
+        protocol
+    )
     return {
-        "schema_version": MERGELITE9_PROJECTOR_CONFIG_SCHEMA,
-        "name": PROJECTOR_NAME,
-        "contract_version": PROJECTOR_VERSION,
+        "schema_version": schema,
+        "name": name,
+        "contract_version": version,
         "observation_shape": [8],
         "epsilon_ratio": protocol.epsilon_ratio,
-        "sensor_contract": MERGELITE9_SENSOR_ATTACK_CONTRACT,
+        "sensor_contract": sensor_contract,
         "policy_input_epsilon": protocol.feature_epsilon.tolist(),
     }
 
@@ -1381,9 +1404,12 @@ def _write_audit_config(
         name="protocol_sha256",
     )
     projector_sha = sha256_file(projector_config)
+    _, projector_name, projector_version, _ = _projector_contract_for_protocol(
+        protocol
+    )
     projector_contract_sha = semantic_projector_contract_sha256(
-        name=PROJECTOR_NAME,
-        version=PROJECTOR_VERSION,
+        name=projector_name,
+        version=projector_version,
         factory=PROJECTOR_FACTORY,
         factory_kwargs={},
         observation_shape=(8,),
@@ -1455,8 +1481,8 @@ def _write_audit_config(
             "contract_sha256": factorization.contract_hash,
         },
         "semantic_projector": {
-            "name": PROJECTOR_NAME,
-            "version": PROJECTOR_VERSION,
+            "name": projector_name,
+            "version": projector_version,
             "factory": PROJECTOR_FACTORY,
             "factory_kwargs": {},
             "observation_shape": [8],

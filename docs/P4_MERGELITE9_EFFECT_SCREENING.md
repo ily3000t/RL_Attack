@@ -20,6 +20,25 @@ labels maximize normalized positive safety-harm advantage multiplied by the
 target-to-clean probability ratio. This is a validation hypothesis, not a
 positive result claim.
 
+## Ratio-6 post-hoc stress rerun
+
+`configs/experiments/p4_mergelite9_effect_screening_eps600.yaml` registers a
+separate, non-formal sensitivity rerun of the v2a validation design. It changes
+only the protocol name and `epsilon_ratio` from `0.5` to `6.0`; the victim,
+training/data sizes, temporal budget, solver settings, reachability rule and
+seed cohorts remain fixed. With the trusted base scale `0.05`, its effective
+per-feature epsilon is `[0, .3, .3, .3, .3, .3, .3, 0]`. The contract bounds
+the effective epsilon values to `[0, 1]`; the dimensionless ratio itself need
+not be at most one.
+
+Because this post-hoc stress run intentionally reuses the prior validation
+seeds, it supports only a paired epsilon-sensitivity comparison. It is not an
+independent validation result, may not strengthen the evidence tier, and must
+not run or consume the registered final cohort. Only `prepare`, `verify` and
+the generated validation audit are in scope; the formal final audit and
+`analyze` command remain out of scope. This section specifies the experiment
+before execution and makes no result claim.
+
 The checked protocol is
 `configs/experiments/p4_mergelite9_effect_screening.yaml`. It fixes:
 

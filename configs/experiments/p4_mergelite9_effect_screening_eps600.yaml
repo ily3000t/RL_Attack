@@ -1,0 +1,42 @@
+# Post-hoc, non-formal ratio-6 stress rerun of the P4 v2a validation design.
+# It reuses the validation cohort for a paired sensitivity comparison and must
+# never be analyzed as an independent validation result or consume final seeds.
+schema_version: rl_attack.p4_mergelite9_effect_protocol.v2
+name: p4_mergelite9_stfa_effect_screening_v2a_eps600
+seed_registry_version: p4-mergelite9-effect-seeds-v1
+resources:
+  torch_threads: 1
+victim:
+  total_timesteps: 150000
+  n_steps: 512
+  batch_size: 128
+  n_epochs: 10
+  learning_rate: 0.0003
+  admission:
+    episodes: 50
+    min_return_advantage: 2.0
+    min_merge_success_rate: 0.6
+    max_collision_rate: 0.1
+datasets:
+  critic_episodes: 200
+  director_episodes: 200
+artifacts:
+  critic_gradient_steps: 1500
+  critic_batch_size: 256
+  director_gradient_steps: 1500
+  hidden_sizes: [128, 128]
+attack:
+  # The ratio scales the trusted 0.05 sensor base. Ratio 6 therefore gives
+  # [0, .3, .3, .3, .3, .3, .3, 0], whose effective values remain in [0, 1].
+  epsilon_base: 0.05
+  epsilon_ratio: 6.0
+  temporal_budget:
+    k: 8
+    min_gap: 2
+    window_size: 16
+    window_k: 2
+  steps: 20
+  restarts: 5
+  reachable_top_k: 3
+  validation_episodes: 50
+  audit_episodes: 50

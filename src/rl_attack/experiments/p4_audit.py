@@ -78,18 +78,18 @@ from rl_attack.envs.mergelite9 import (
     MERGELITE9_OBSERVATION_HIGH,
     MERGELITE9_OBSERVATION_LOW,
     MERGELITE9_OBSERVATION_SHAPE,
-    MERGELITE9_PROJECTOR_CONFIG_SCHEMA,
-    MERGELITE9_PROJECTOR_NAME,
-    MERGELITE9_PROJECTOR_VERSION,
+    MERGELITE9_PROJECTOR_NAME_V1,
+    MERGELITE9_PROJECTOR_NAME_V2,
+    MERGELITE9_PROJECTOR_VERSION_V1,
+    MERGELITE9_PROJECTOR_VERSION_V2,
     MERGELITE9_REGISTRY_KEY,
     MERGELITE9_RUNTIME_TYPE,
     MERGELITE9_SAFETY_COST_DEFINITION_SHA256,
-    MERGELITE9_SENSOR_ATTACK_CONTRACT,
-    MERGELITE9_SENSOR_ATTACK_CONTRACT_SHA256,
     MergeLite9Projector,
     make_mergelite9,
     mergelite9_factorization,
     mergelite9_feature_epsilon,
+    mergelite9_sensor_attack_contract,
 )
 from rl_attack.policies.sb3 import SB3CategoricalPolicyAdapter
 from rl_attack.training.pa_ad import freeze_sb3_victim
@@ -1325,9 +1325,12 @@ def load_p4_audit_config(path: str | Path) -> P4AuditConfig:
         raise ValueError(
             "semantic_projector.guarantee must explicitly limit claims to policy input"
         )
+    mergelite_projector_identity = (
+        (MERGELITE9_PROJECTOR_NAME_V1, MERGELITE9_PROJECTOR_VERSION_V1),
+        (MERGELITE9_PROJECTOR_NAME_V2, MERGELITE9_PROJECTOR_VERSION_V2),
+    )
     mergelite_projector_binding = (
-        projector.name == MERGELITE9_PROJECTOR_NAME
-        and projector.version == MERGELITE9_PROJECTOR_VERSION
+        (projector.name, projector.version) in mergelite_projector_identity
         and projector.factory == P4_MERGELITE_PROJECTOR_FACTORY
         and projector.factory_kwargs == {}
         and projector.observation_shape == MERGELITE9_OBSERVATION_SHAPE
@@ -1343,8 +1346,8 @@ def load_p4_audit_config(path: str | Path) -> P4AuditConfig:
         environment.registry_key != P4_MERGELITE_ENVIRONMENT_REGISTRY
         and (
             projector.factory == P4_MERGELITE_PROJECTOR_FACTORY
-            or projector.name == MERGELITE9_PROJECTOR_NAME
-            or projector.version == MERGELITE9_PROJECTOR_VERSION
+            or projector.name in {item[0] for item in mergelite_projector_identity}
+            or projector.version in {item[1] for item in mergelite_projector_identity}
         )
     ):
         raise ValueError(
@@ -1815,12 +1818,19 @@ def build_mergelite9_projector(
 ) -> Projector:
     """Build only the registry-bound MergeLite9 sensor projector."""
 
+    try:
+        expected_schema, expected_name, expected_sensor_contract = (
+            mergelite9_sensor_attack_contract(context.config.projector.version)
+        )
+    except ValueError as exc:
+        raise ValueError(
+            "MergeLite9 projector factory is outside its exact registry entry"
+        ) from exc
     if (
         context.config.environment.registry_key
         != P4_MERGELITE_ENVIRONMENT_REGISTRY
         or context.config.projector.factory != P4_MERGELITE_PROJECTOR_FACTORY
-        or context.config.projector.name != MERGELITE9_PROJECTOR_NAME
-        or context.config.projector.version != MERGELITE9_PROJECTOR_VERSION
+        or context.config.projector.name != expected_name
         or context.config.projector.factory_kwargs
         or context.config.projector.observation_shape
         != MERGELITE9_OBSERVATION_SHAPE
@@ -1848,9 +1858,9 @@ def build_mergelite9_projector(
         location="MergeLite9 projector config",
     )
     if (
-        raw["schema_version"] != MERGELITE9_PROJECTOR_CONFIG_SCHEMA
-        or raw["name"] != MERGELITE9_PROJECTOR_NAME
-        or raw["contract_version"] != MERGELITE9_PROJECTOR_VERSION
+        raw["schema_version"] != expected_schema
+        or raw["name"] != expected_name
+        or raw["contract_version"] != context.config.projector.version
         or _shape(
             raw["observation_shape"],
             "MergeLite9 projector config.observation_shape",
@@ -1864,15 +1874,18 @@ def build_mergelite9_projector(
     )
     sensor_payload = dict(sensor_contract)
     sensor_sha = sensor_payload.pop("sha256", None)
+    expected_sensor_sha = expected_sensor_contract["sha256"]
     if (
-        sensor_sha != MERGELITE9_SENSOR_ATTACK_CONTRACT_SHA256
-        or canonical_json_sha256(sensor_payload)
-        != MERGELITE9_SENSOR_ATTACK_CONTRACT_SHA256
-        or sensor_contract != MERGELITE9_SENSOR_ATTACK_CONTRACT
+        sensor_sha != expected_sensor_sha
+        or canonical_json_sha256(sensor_payload) != expected_sensor_sha
+        or sensor_contract != expected_sensor_contract
     ):
         raise ValueError("MergeLite9 trusted sensor attack contract differs")
     epsilon_ratio = raw["epsilon_ratio"]
-    expected_epsilon = mergelite9_feature_epsilon(epsilon_ratio)
+    expected_epsilon = mergelite9_feature_epsilon(
+        epsilon_ratio,
+        contract_version=context.config.projector.version,
+    )
     configured_epsilon = _finite_array(
         raw["policy_input_epsilon"],
         shape=MERGELITE9_OBSERVATION_SHAPE,
@@ -1882,7 +1895,10 @@ def build_mergelite9_projector(
         raise ValueError(
             "MergeLite9 policy input epsilon differs from base*ratio"
         )
-    return MergeLite9Projector(epsilon_ratio=float(epsilon_ratio))
+    return MergeLite9Projector(
+        epsilon_ratio=float(epsilon_ratio),
+        contract_version=context.config.projector.version,
+    )
 
 
 def build_sumo_merge_v1_projector(

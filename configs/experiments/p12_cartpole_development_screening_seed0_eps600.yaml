@@ -1,0 +1,90 @@
+schema_version: rl_attack.p12_benchmark.v1
+name: p12_cartpole_development_screening_seed0_eps600
+phase: p2
+claim_tier: smoke
+cohort:
+  role: validation
+  episode_seed_start: 25000
+  episode_seed_count: 50
+environment:
+  id: CartPole-v1
+  family: gymnasium_standard
+  max_episode_steps: 500
+  observation_adapter:
+    type: flatten_if_ndim_gt_1
+    order: C
+victims:
+  - name: adv_ppo_seed0
+    method: adv_ppo
+    training_seed: 0
+    checkpoint:
+      path: ../../outputs/p12_cartpole_development_20260809/adv_ppo_seed0/model.zip
+      sha256: 5f76fd68defcdd2b2ac3f1db931cd97070f647dbe89f6023a5ec87632a0eeda3
+    manifest:
+      path: ../../outputs/p12_cartpole_development_20260809/adv_ppo_seed0/manifest.json
+      sha256: 78dd89d1e1ede8c1dd4d81a71ef7a5701668f59c90d9130e5434ae3effc9aa46
+  - name: car_ppo_seed0
+    method: car_ppo
+    training_seed: 0
+    checkpoint:
+      path: ../../outputs/p12_cartpole_development_20260809/car_ppo_seed0/model.zip
+      sha256: db6e01a3c9940439901e7468ed4804abb24c45d8d1f4e7f3cb2e9cd65b403450
+    manifest:
+      path: ../../outputs/p12_cartpole_development_20260809/car_ppo_seed0/manifest.json
+      sha256: e9799b081a82e10040c4226062f35883b69d4ce2bf663953dff2839906378e65
+  - name: sa_ppo_seed0
+    method: sa_ppo
+    training_seed: 0
+    checkpoint:
+      path: ../../outputs/p12_cartpole_development_20260809/sa_ppo_seed0/model.zip
+      sha256: d4a6e7dbf0f5ddc8cf236ef19f3d8384c5e37c560cd45c13185d50bbe7837a60
+    manifest:
+      path: ../../outputs/p12_cartpole_development_20260809/sa_ppo_seed0/manifest.json
+      sha256: 775ca7337f25e226c66b6b376cfcfded99930757158b447e9c796757554f5b3a
+  - name: vanilla_ppo_seed0
+    method: vanilla_ppo
+    training_seed: 0
+    checkpoint:
+      path: ../../outputs/p12_cartpole_development_20260809/vanilla_ppo_seed0/model.zip
+      sha256: ad00e790c6947924e9bfad8893028b6e2ca5783e7bd171f3cd3b4c1154718a2c
+    manifest:
+      path: ../../outputs/p12_cartpole_development_20260809/vanilla_ppo_seed0/manifest.json
+      sha256: 804a90178786edc4316de7325e21a2374bf21141c84540fb784663fb7e9ffd9f
+epsilon_profile:
+  name: cartpole_policy_input_linf_v1
+  space: policy_input
+  norm: linf
+  base_per_feature: [0.05, 0.05, 0.01, 0.01]
+  mutable_mask: [true, true, true, true]
+  ratios: [6.0]
+attacks:
+  - name: random_uniform
+    kind: random_uniform
+  - name: fgsm_ce
+    kind: fgsm_ce
+  - name: pgd_ce
+    kind: pgd_ce
+    steps: 20
+    restarts: 5
+    random_start: true
+  - name: categorical_mad_pgd
+    kind: categorical_mad_pgd
+    steps: 20
+    restarts: 5
+    random_start: true
+fairness:
+  victim_action_mode: deterministic
+  attack_probability: 1.0
+  attack_base_seed: 25000000
+  seed_derivation: sha256_u63_canonical_json_v1
+  paired_episode_seeds: true
+  paired_attack_opportunities_across_methods: true
+  paired_solver_randomness_across_methods: true
+  budget:
+    max_policy_queries_per_attacked_step: 128
+    max_gradient_evaluations_per_attacked_step: 100
+statistics:
+  confidence_level: 0.95
+  bootstrap_replicates: 1000
+  bootstrap_seed: 26000000
+  cvar_alpha: 0.10
