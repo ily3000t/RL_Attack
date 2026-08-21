@@ -1,0 +1,65 @@
+schema_version: rl_attack.p2_outcome_diagnostic_config.v1
+name: p2_cartpole_outcome_diagnostic_eps600
+claim_tier: post_hoc
+source_benchmark:
+  config:
+    path: p12_cartpole_development_screening_seed0_eps600.yaml
+    sha256: 08fbb79fc1ec4df5a39ab3aead0018e14812ebd4b2f32e6dca82a0ee831857a0
+  manifest:
+    path: ../../outputs/p12_cartpole_development_screening_eps600_3a1b114_20260813/manifest.json
+    sha256: e41f9613f000a32407011f8f3cec388f63887c3bfc14ffd476736546eba31467
+  require_verified: true
+defense_configs:
+  vanilla_ppo:
+    path: ../defenses/vanilla_ppo.yaml
+    sha256: d8b93154822a9fc40ff0e1c4faada4a7d49ee76ae8c8817a1fdc557f1c24d169
+  adv_ppo:
+    path: ../defenses/adv_ppo.yaml
+    sha256: 10df63ad7256fa76b7a0618ec119b0f992180073c89bccd87610cf00718a45fe
+  sa_ppo:
+    path: ../defenses/sa_ppo.yaml
+    sha256: 8ebeac965cd050b5cf2fcfa7b0e9f19d900316886eff86ad0bbbd9c4db64b176
+  car_ppo:
+    path: ../defenses/car_ppo_style.yaml
+    sha256: ce4411538481fa9288889fe035b1d40fb19e6eda06a27739a5e8f02c5161f44f
+cohort:
+  role: diagnostic
+  episode_seed_start: 25000
+  episode_seed_count: 10
+epsilon_profile:
+  name: cartpole_policy_input_linf_v1
+  ratio: 6.0
+interventions:
+  - name: clean
+    kind: clean
+  - name: opposite_all
+    kind: opposite_all
+  - name: opposite_first_1
+    kind: opposite_first_k
+    k: 1
+  - name: opposite_first_5
+    kind: opposite_first_k
+    k: 5
+  - name: opposite_first_20
+    kind: opposite_first_k
+    k: 20
+pgd_trace:
+  attack_name: pgd_ce
+  steps: 20
+  restarts: 5
+  random_start: true
+  max_states_per_episode: 8
+  record_initial_state: true
+  record_every_iteration: true
+  use_production_solver: true
+safety_margins:
+  cart_position_limit: 2.4
+  pole_angle_limit_radians: 0.20943951023931953
+statistics:
+  confidence_level: 0.95
+  bootstrap_replicates: 1000
+  bootstrap_seed: 27000000
+claims:
+  post_hoc: true
+  formal_eligible: false
+  diagnostic_only: true
