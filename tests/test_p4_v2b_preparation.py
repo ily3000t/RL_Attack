@@ -35,6 +35,7 @@ from rl_attack.experiments.p4_v2b import (
     _projector_contract,
     _query_accounting_contract,
     _require_clean_runtime,
+    _require_critic_dataset_binding_matches_artifact,
     _require_matching_runtime_dependencies,
     _runtime_dependency_contract,
     _stage_config,
@@ -487,3 +488,36 @@ def test_query_contract_total_is_exact_unweighted_sum() -> None:
                 "director_queries",
             )
         )
+
+
+def test_critic_dataset_schema_is_cross_bound_separately_from_artifact() -> None:
+    critic = _critic_binding()
+    dataset = {
+        "schema_version": p4_v2b_module.TRAJECTORY_RISK_DATASET_BINDING_SCHEMA,
+        **{
+            key: critic[key]
+            for key in (
+                "dataset_sha256",
+                "dataset_manifest_sha256",
+                "training_batch_sha256",
+                "victim_checkpoint_sha256",
+                "victim_policy_state_sha256",
+                "environment_contract_sha256",
+                "oracle_contract_sha256",
+                "trajectory_risk_contract_sha256",
+                "projector_contract_sha256",
+                "action_ontology_sha256",
+            )
+        },
+    }
+    _require_critic_dataset_binding_matches_artifact(dataset, critic)
+
+    wrong_schema = dict(dataset)
+    wrong_schema["schema_version"] = "rl_attack.invalid"
+    with pytest.raises(ValueError, match="schema differs"):
+        _require_critic_dataset_binding_matches_artifact(wrong_schema, critic)
+
+    wrong_digest = dict(dataset)
+    wrong_digest["dataset_sha256"] = "f" * 64
+    with pytest.raises(ValueError, match="differs from critic artifact"):
+        _require_critic_dataset_binding_matches_artifact(wrong_digest, critic)

@@ -113,6 +113,7 @@ from rl_attack.training.stfa_trajectory_director import (
     validate_trajectory_director_dataset_binding,
 )
 from rl_attack.training.stfa_trajectory_pipeline import (
+    TRAJECTORY_RISK_DATASET_BINDING_SCHEMA,
     build_trajectory_risk_arrays,
     load_trajectory_risk_dataset,
     trajectory_risk_label_contract,
@@ -1459,6 +1460,31 @@ def _critic_binding_with_manifest(
     return result
 
 
+def _require_critic_dataset_binding_matches_artifact(
+    dataset_binding: Mapping[str, Any],
+    critic_binding: Mapping[str, Any],
+) -> None:
+    """Cross-bind B2 dataset identity without conflating its schema field.
+
+    The dataset binding owns ``schema_version`` while the later critic artifact
+    binding intentionally does not.  Every scientific digest shared by the two
+    records must nevertheless match exactly.
+    """
+
+    dataset = _json_copy(dataset_binding)
+    critic = _json_copy(critic_binding)
+    if dataset.get("schema_version") != TRAJECTORY_RISK_DATASET_BINDING_SCHEMA:
+        raise ValueError("verified critic dataset binding schema differs")
+    shared = {key: value for key, value in dataset.items() if key != "schema_version"}
+    missing = sorted(key for key in shared if key not in critic)
+    if missing:
+        raise ValueError(
+            f"critic artifact binding is missing dataset fields {missing!r}"
+        )
+    if any(critic[key] != value for key, value in shared.items()):
+        raise ValueError("verified critic dataset binding differs from critic artifact")
+
+
 def _runtime_pins(
     critic_binding: Mapping[str, Any],
     director_binding: Mapping[str, Any],
@@ -2620,10 +2646,10 @@ def verify_p4_v2b_preparation(
         name="manifest bindings",
     )
     critic_binding = _json_copy(bindings["critic"])
-    if critic_dataset.dataset_binding != {
-        key: critic_binding[key] for key in critic_dataset.dataset_binding
-    }:
-        raise ValueError("verified critic dataset binding differs from critic artifact")
+    _require_critic_dataset_binding_matches_artifact(
+        critic_dataset.dataset_binding,
+        critic_binding,
+    )
     critic, critic_manifest = load_stfa_trajectory_critic(
         artifact_paths["critic_checkpoint"],
         expected_sha256=artifact_hashes["critic_checkpoint"],
