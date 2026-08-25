@@ -1,0 +1,53 @@
+schema_version: rl_attack.p4_v2b_preparation_protocol.v1
+name: p4_mergelite9_v2b_trajectory_risk
+environment_name: RL_Attack_Core_Py310
+seed_registry_version: p4-v2b-mergelite9-seeds-v1
+
+resources:
+  device: cpu
+  torch_threads: 1
+
+victim:
+  checkpoint: outputs/p4_mergelite9_effect_v2a_eps600_prepared_3a1b114_20260813/victim/mergelite9_vanilla_ppo.zip
+  manifest: outputs/p4_mergelite9_effect_v2a_eps600_prepared_3a1b114_20260813/victim/manifest.json
+  checkpoint_sha256: 109e89a0cf8227facf5a9c309b9db2bed7be299627f007e7e409d6de2e11de7e
+  manifest_sha256: ec2190e557ea48dd8efc361c58b5bc220f01a029e532b513fa65b8cdf47c900c
+  policy_state_sha256: 9b29eb2b873851daa4aade33957d6d811f47c722d4616e48dfc83836391bb881
+
+collection:
+  critic_episodes: 200
+  director_episodes: 200
+
+training:
+  critic:
+    hidden_sizes: [128, 128]
+    epochs: 40
+    batch_size: 128
+  director:
+    hidden_sizes: [128, 128]
+    epochs: 40
+    batch_size: 128
+
+attack:
+  epsilon_ratio: 6.0
+  risk:
+    horizon: 64
+    discount: 0.99
+    replicates: 1
+    return_scale: 25.0
+    safety_scale: 10.0
+    return_weight: 1.0
+    merge_failure_weight: 1.0
+    safety_weight: 1.0
+  temporal_budget:
+    k: 8
+    min_gap: 2
+    window_size: 16
+    window_k: 2
+  solver:
+    steps: 20
+    restarts: 5
+
+evaluation:
+  validation_episodes: 50
+  matched_episodes: 50
