@@ -127,6 +127,11 @@ rl-attack-train-rapid-guard train --help
 rl-attack-train-rapid-guard verify --help
 rl-attack-p5-audit <resolved-p5-config.yaml> `
   --output-dir outputs/p5_rapid_guard_audit
+rl-attack-p5-adaptive-smoke run `
+  configs/experiments/p5_mergelite9_adaptive_engineering_smoke.yaml `
+  --output-dir outputs/p5_mergelite9_adaptive_smoke_<commit>_<date>
+rl-attack-p5-adaptive-smoke verify <run-directory> `
+  --expected-manifest-sha256 <printed_sha256>
 ```
 
 The RAPID-Guard training help lists every mandatory pinned input and expected
@@ -134,6 +139,9 @@ digest; there is intentionally no shorthand that bypasses those bindings. The
 CLI is a correctness smoke path, not the final statistical experiment runner.
 Final results must use frozen victim sets, paired test seeds, and the protocol
 in `configs/experiments`.
+The adaptive-smoke command is intentionally test-scoped: it executes a real
+BPDA/purifier/Guard/environment chain but cannot establish attack strength or
+defense effectiveness.
 
 ## Verification
 

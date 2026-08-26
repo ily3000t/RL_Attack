@@ -20,6 +20,7 @@ from rl_attack.defenses.rapid_guard.contracts import (
     CERTIFICATE_SCOPE,
     DETECTOR_CHANNELS,
 )
+from rl_attack.experiments.p5_adaptive_smoke import CLAIM_BOUNDARY
 from rl_attack.experiments.p5_audit import (
     ACCOUNTING_FIELDS,
     P5_AUDIT_SCHEMA_VERSION,
@@ -28,18 +29,9 @@ from rl_attack.experiments.p5_audit import (
 
 ROOT = Path(__file__).resolve().parents[1]
 METHOD_CONFIG = ROOT / "configs" / "defenses" / "rapid_guard.yaml"
-SYNTHETIC_GATE = (
-    ROOT
-    / "configs"
-    / "experiments"
-    / "p5_synthetic_9action_implementation_gate.yaml"
-)
-SUMO_GATE = (
-    ROOT
-    / "configs"
-    / "experiments"
-    / "p5_sumo_rapid_guard_implementation_gate.yaml"
-)
+SYNTHETIC_GATE = ROOT / "configs" / "experiments" / "p5_synthetic_9action_implementation_gate.yaml"
+SUMO_GATE = ROOT / "configs" / "experiments" / "p5_sumo_rapid_guard_implementation_gate.yaml"
+ADAPTIVE_SMOKE = ROOT / "configs" / "experiments" / "p5_mergelite9_adaptive_engineering_smoke.yaml"
 ZERO_SHA256 = "0" * 64
 TEMPLATE_SCHEMA = "rl_attack.p5_rapid_guard_implementation_gate_template.v1"
 
@@ -103,13 +95,48 @@ def _cells(config: Mapping[str, Any]) -> set[tuple[str, str]]:
 
 
 def test_p5_checked_in_yaml_has_unique_keys_and_safe_values() -> None:
-    for path in (METHOD_CONFIG, SYNTHETIC_GATE, SUMO_GATE):
+    for path in (METHOD_CONFIG, SYNTHETIC_GATE, SUMO_GATE, ADAPTIVE_SMOKE):
         config = _load(path)
         assert all(
-            scalar is None
-            or isinstance(scalar, (str, int, float, bool))
+            scalar is None or isinstance(scalar, (str, int, float, bool))
             for scalar in _walk_scalars(config)
         )
+
+
+def test_p5_adaptive_smoke_config_is_static_test_scope_only() -> None:
+    config = _load(ADAPTIVE_SMOKE)
+    assert config["schema_version"] == "rl_attack.p5_adaptive_engineering_smoke.v1"
+    assert config["test_scope"] is True
+    assert config["resources"] == {"device": "cpu", "torch_threads": 1}
+    assert config["attack"]["epsilon_ratio"] == 6.0
+    assert config["attack"]["projector_contract_version"] == ("mergelite9-sensor-attack-v2")
+    assert config["attack"]["adaptive_scope"] == ("fixed_anchor_purifier_surrogate_only")
+    assert config["attack"]["hard_gates_excluded"] == [
+        "detector",
+        "certificate",
+        "fallback",
+        "shield",
+    ]
+    assert config["defense_fixture"]["trained_rapid_guard_bundle_used"] is False
+    assert config["defense_fixture"]["certificate_mode"] == "disabled"
+    assert config["seeds"] == {
+        "role": "p5_engineering_smoke_only",
+        "episode_seeds": [554100, 554101],
+        "matched_seeds_consumed": False,
+        "future_final_seeds_consumed": False,
+    }
+    assert set(config["claims"]) == set(CLAIM_BOUNDARY)
+    assert all(value is False for value in config["claims"].values())
+    for name, value in config["inputs"].items():
+        if name.endswith("_sha256"):
+            assert (
+                isinstance(value, str)
+                and len(value) == 64
+                and value != ZERO_SHA256
+                and all(character in "0123456789abcdef" for character in value)
+            )
+        elif name != "victim_policy_state_sha256":
+            assert isinstance(value, str) and value.startswith("../../outputs/")
 
 
 def test_method_config_keeps_scientific_claim_gates_closed() -> None:
@@ -130,9 +157,7 @@ def test_method_config_keeps_scientific_claim_gates_closed() -> None:
     assert anchor["score_before_update"] is True
     assert anchor["update_after_complete_step_validation"] is True
     assert anchor["reset_at_episode_boundary"] is True
-    assert {"suspicious_observation", "fallback"} <= set(
-        anchor["rejected_updates"]
-    )
+    assert {"suspicious_observation", "fallback"} <= set(anchor["rejected_updates"])
 
     history = config["history_bootstrap"]
     assert history["mode"] == "strict_calibrated_v1"
@@ -154,26 +179,18 @@ def test_method_config_keeps_scientific_claim_gates_closed() -> None:
     assert training["temporal_windows_may_cross_episode_or_scenario"] is False
 
     adaptive = config["adaptive_attack_evaluation"]
-    expected_non_clean = {
-        attack for attack, _ in REQUIRED_CELLS if attack != "Clean"
-    }
+    expected_non_clean = {attack for attack, _ in REQUIRED_CELLS if attack != "Clean"}
     assert set(adaptive["required_matrix"]["non_adaptive"]) == expected_non_clean
     assert set(adaptive["required_matrix"]["defense_aware"]) == expected_non_clean
     assert adaptive["attacker_training_split"] == "attacker_train"
-    assert (
-        adaptive["failed_or_missing_cell_invalidates_worst_case_summary"]
-        is True
-    )
+    assert adaptive["failed_or_missing_cell_invalidates_worst_case_summary"] is True
 
     accounting = config["accounting"]
     assert tuple(accounting["non_fungible_components"]) == ACCOUNTING_FIELDS
     assert accounting["unified_total_query_budget"] is False
 
     for hypothesis in ("h1", "h2", "h3"):
-        assert (
-            config["falsifiable_hypotheses"][hypothesis]["status"]
-            == "empirical_test_pending"
-        )
+        assert config["falsifiable_hypotheses"][hypothesis]["status"] == "empirical_test_pending"
     evidence = config["evidence_scope"]
     assert evidence["public_driving_empirical_effectiveness"] is False
     assert evidence["sumo_empirical_effectiveness"] is False
@@ -212,27 +229,18 @@ def test_p5_gate_matrix_and_nonfungible_accounting_are_exact() -> None:
         assert anchor["prior_trusted_frames"] == 2
         assert anchor["consecutive_steps_required"] is True
         assert anchor["repeated_first_bootstrap_allowed"] is False
-        assert anchor["uncalibrated_warmup_behavior"] == (
-            "fail_closed_before_policy_or_ibp"
-        )
-        assert anchor["fallback_history_behavior"] == (
-            "invalidate_until_explicit_rebootstrap"
-        )
+        assert anchor["uncalibrated_warmup_behavior"] == ("fail_closed_before_policy_or_ibp")
+        assert anchor["fallback_history_behavior"] == ("invalidate_until_explicit_rebootstrap")
         assert len(config["formal_evaluation"]["required_cells"]) == 13
         assert _cells(config) == set(REQUIRED_CELLS)
         assert (
-            config["formal_evaluation"][
-                "missing_or_failed_cell_invalidates_robust_summary"
-            ]
-            is True
+            config["formal_evaluation"]["missing_or_failed_cell_invalidates_robust_summary"] is True
         )
         accounting = config["formal_evaluation"]["accounting"]
         assert accounting["components_are_non_fungible"] is True
         assert accounting["unified_total_query_budget"] is False
         assert tuple(accounting["components"]) == ACCOUNTING_FIELDS
-        assert config["formal_evaluation"][
-            "worst_case_endpoints_are_independent"
-        ] == [
+        assert config["formal_evaluation"]["worst_case_endpoints_are_independent"] == [
             "minimum_episode_return",
             "maximum_collision_count",
             "maximum_near_miss_count",
@@ -246,17 +254,12 @@ def test_p5_gates_pin_authoritative_nine_action_ontology() -> None:
         ontology = _load(path)["action_ontology"]
         assert tuple(ontology["labels"]) == factorization.labels
         assert ontology["ontology_sha256"] == factorization.ontology_hash
-        assert (
-            ontology["availability_contract_sha256"]
-            == factorization.contract_hash
-        )
+        assert ontology["availability_contract_sha256"] == factorization.contract_hash
 
     sumo = _load(SUMO_GATE)
     fallback = sumo["method"]["fallback"]
     assert fallback["preferred_action_indices"] == [4]
-    assert fallback["preferred_action_labels"] == [
-        factorization.decode(4).label
-    ]
+    assert fallback["preferred_action_labels"] == [factorization.decode(4).label]
 
 
 def test_p5_synthetic_gate_pins_local_semantic_contract() -> None:
@@ -270,8 +273,9 @@ def test_p5_synthetic_gate_pins_local_semantic_contract() -> None:
 def test_p5_sumo_gate_pins_local_scenario_semantic_and_safety_hashes() -> None:
     config = _load(SUMO_GATE)
     environment_config = config["environment"]["config"]
-    assert sha256_file(_resolve(SUMO_GATE, environment_config["path"])) == (
-        environment_config["file_sha256"]
+    assert (
+        sha256_file(_resolve(SUMO_GATE, environment_config["path"]))
+        == (environment_config["file_sha256"])
     )
 
     for record in (
@@ -290,13 +294,9 @@ def test_p5_sumo_gate_pins_local_scenario_semantic_and_safety_hashes() -> None:
         assert provenance["files"][Path(asset["path"]).name] == asset["sha256"]
 
     semantic = config["semantic_projector"]
-    assert sha256_file(_resolve(SUMO_GATE, semantic["path"])) == (
-        semantic["file_sha256"]
-    )
+    assert sha256_file(_resolve(SUMO_GATE, semantic["path"])) == (semantic["file_sha256"])
     safety = config["safety_contract"]
-    assert sha256_file(_resolve(SUMO_GATE, safety["path"])) == (
-        safety["file_sha256"]
-    )
+    assert sha256_file(_resolve(SUMO_GATE, safety["path"])) == (safety["file_sha256"])
     assert safety["file_sha256"] == safety["cost_definition_sha256"]
 
 
@@ -313,6 +313,7 @@ def test_p5_console_scripts_catalog_and_public_exports() -> None:
     scripts = project["project"]["scripts"]
     expected_scripts = {
         "rl-attack-p5-audit": "rl_attack.cli.p5_audit:main",
+        "rl-attack-p5-adaptive-smoke": "rl_attack.cli.p5_adaptive_smoke:main",
         "rl-attack-train-rapid-guard": "rl_attack.cli.rapid_guard_training:main",
     }
     for name, target in expected_scripts.items():
@@ -345,8 +346,14 @@ def test_p5_console_scripts_catalog_and_public_exports() -> None:
     ):
         assert not hasattr(training, implementation_detail)
     assert experiments.P5_AUDIT_SCHEMA_VERSION == P5_AUDIT_SCHEMA_VERSION
+    assert experiments.P5_ADAPTIVE_SMOKE_SCHEMA_VERSION == (
+        "rl_attack.p5_adaptive_engineering_smoke.v1"
+    )
     assert callable(experiments.load_p5_audit_config)
+    assert callable(experiments.load_p5_adaptive_smoke_config)
     assert callable(experiments.run_p5_audit)
+    assert callable(experiments.run_p5_adaptive_smoke)
+    assert callable(experiments.verify_p5_adaptive_smoke)
 
 
 def test_readme_uses_real_p5_console_entrypoint_syntax() -> None:
@@ -354,14 +361,11 @@ def test_readme_uses_real_p5_console_entrypoint_syntax() -> None:
     assert "rl-attack-train-rapid-guard train --help" in readme
     assert "rl-attack-train-rapid-guard verify --help" in readme
     assert "rl-attack-p5-audit <resolved-p5-config.yaml>" in readme
-    assert (
-        "python -m rl_attack.cli.rapid_guard_training train <all-pinned-inputs>"
-        not in readme
-    )
+    assert "rl-attack-p5-adaptive-smoke run" in readme
+    assert "rl-attack-p5-adaptive-smoke verify" in readme
+    assert "python -m rl_attack.cli.rapid_guard_training train <all-pinned-inputs>" not in readme
 
-    release = (ROOT / "docs" / "releases" / "P5.md").read_text(
-        encoding="utf-8"
-    )
+    release = (ROOT / "docs" / "releases" / "P5.md").read_text(encoding="utf-8")
     assert "rl-attack-train-rapid-guard train --help" in release
     assert "rl-attack-train-rapid-guard verify --help" in release
     assert "rl-attack-p5-audit <resolved-p5-config.yaml>" in release
@@ -372,9 +376,7 @@ def test_readme_uses_real_p5_console_entrypoint_syntax() -> None:
 def test_documented_p5_help_routes_match_actual_parsers(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    training_main = importlib.import_module(
-        "rl_attack.cli.rapid_guard_training"
-    ).main
+    training_main = importlib.import_module("rl_attack.cli.rapid_guard_training").main
     audit_main = importlib.import_module("rl_attack.cli.p5_audit").main
 
     with pytest.raises(SystemExit) as train_exit:

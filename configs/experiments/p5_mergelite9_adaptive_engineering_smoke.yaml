@@ -1,0 +1,56 @@
+schema_version: rl_attack.p5_adaptive_engineering_smoke.v1
+name: p5_mergelite9_adaptive_engineering_smoke
+environment_name: RL_Attack_Core_Py310
+test_scope: true
+
+resources:
+  device: cpu
+  torch_threads: 1
+
+inputs:
+  victim_checkpoint: ../../outputs/p4_mergelite9_v2b_prepared_7d0b72f_20260825/victim/mergelite9_vanilla_ppo.zip
+  victim_checkpoint_sha256: 109e89a0cf8227facf5a9c309b9db2bed7be299627f007e7e409d6de2e11de7e
+  victim_manifest: ../../outputs/p4_mergelite9_v2b_prepared_7d0b72f_20260825/victim/manifest.json
+  victim_manifest_sha256: ec2190e557ea48dd8efc361c58b5bc220f01a029e532b513fa65b8cdf47c900c
+  victim_policy_state_sha256: 9b29eb2b873851daa4aade33957d6d811f47c722d4616e48dfc83836391bb881
+  p4_development_manifest: ../../outputs/p4_v2b_development_B5_c9a42fa_20260825/manifest.json
+  p4_development_manifest_sha256: 3b6c86cb610ccdc8a321d018b692318f1b14057f94d36ffb1afa4e5d2271646b
+  p4_development_summary: ../../outputs/p4_v2b_development_B5_c9a42fa_20260825/summary.json
+  p4_development_summary_sha256: c5805cf3c9e758279fdedc70ce3d48cc95ff7e6fab74c88eec7d55e561384d01
+
+attack:
+  epsilon_ratio: 6.0
+  projector_contract_version: mergelite9-sensor-attack-v2
+  steps: 4
+  step_fraction: 0.5
+  purifier_attempt_index: 0
+  objective: maximize_clean_greedy_cross_entropy_after_bpda_purifier
+  adaptive_scope: fixed_anchor_purifier_surrogate_only
+  hard_gates_excluded: [detector, certificate, fallback, shield]
+
+defense_fixture:
+  temporal_radius: [2.0, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 2.0]
+  line_search_points: 3
+  detector_threshold: 0.011
+  detector_scope: deterministic_test_scope_mutable_linf_fixture
+  fallback_preferred_actions: [4, 0, 1, 2, 3, 5, 6, 7, 8]
+  certificate_mode: disabled
+  trained_rapid_guard_bundle_used: false
+  runtime_scope: real_RapidGuard_step_with_test_scope_detector_fixture_and_certificate_disabled
+
+seeds:
+  role: p5_engineering_smoke_only
+  episode_seeds: [554100, 554101]
+  matched_seeds_consumed: false
+  future_final_seeds_consumed: false
+
+claims:
+  formal_evaluation_eligible: false
+  formal_summary_eligible: false
+  effectiveness_claim_eligible: false
+  defense_effectiveness_claimed: false
+  p4_attack_strength_claimed: false
+  sumo_effectiveness_claimed: false
+  full_adaptive_defense_evaluated: false
+  exact_end_to_end_gradient: false
+  empirical_defense_effectiveness: false
