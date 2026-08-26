@@ -934,7 +934,10 @@ def run_p4_v2c_engineering(
     output, staging = _preflight_output(output_directory, config.preparation_root)
     source_before = _repository_record()
     if source_before["git_clean"] is not True:
-        raise InvalidP4V2CEngineering("v2c run requires a clean fixed source commit")
+        raise InvalidP4V2CEngineering(
+            "v2c run requires a clean fixed source commit; "
+            f"porcelain={source_before['git_status']!r}"
+        )
     source_hashes = _source_hashes()
     thread_record = _ensure_threads()
     runtime = _load_runtime_for_config(config)
