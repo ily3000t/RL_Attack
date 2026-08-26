@@ -15,8 +15,19 @@ _THREAD_ENVIRONMENT = (
 )
 for _name in _THREAD_ENVIRONMENT:
     os.environ[_name] = "1"
+_PRELOADED_SCIENTIFIC_MODULES = tuple(
+    name
+    for name in ("numpy", "torch", "gymnasium", "stable_baselines3")
+    if name in sys.modules
+)
+os.environ["RL_ATTACK_P4_V2B_PREIMPORT_THREADS"] = (
+    "1" if not _PRELOADED_SCIENTIFIC_MODULES else "0"
+)
+os.environ["RL_ATTACK_P4_V2B_PRELOADED_MODULES"] = ",".join(
+    _PRELOADED_SCIENTIFIC_MODULES
+)
 os.environ["RL_ATTACK_P4_V2C_PRELOADED_SCIENTIFIC_MODULES"] = ",".join(
-    name for name in ("numpy", "torch", "gymnasium", "stable_baselines3") if name in sys.modules
+    _PRELOADED_SCIENTIFIC_MODULES
 )
 
 from rl_attack.experiments.p4_v2c_engineering import (  # noqa: E402
