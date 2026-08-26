@@ -1,0 +1,60 @@
+schema_version: rl_attack.p4_v2c_engineering_config.v1
+name: p4_mergelite9_v2c_top2_matched_engineering
+environment_name: RL_Attack_Core_Py310
+test_scope: true
+
+resources:
+  device: cpu
+  torch_threads: 1
+
+inputs:
+  preparation_root: ../../outputs/p4_mergelite9_v2b_prepared_7d0b72f_20260825
+  preparation_manifest_sha256: f134cb53245a2573235357ce9da90424d48e3dc4e2c2107cf52982d3783788d0
+  p4_v2b_development_manifest: ../../outputs/p4_v2b_development_B5_c9a42fa_20260825/manifest.json
+  p4_v2b_development_manifest_sha256: 3b6c86cb610ccdc8a321d018b692318f1b14057f94d36ffb1afa4e5d2271646b
+  p4_v2b_development_summary: ../../outputs/p4_v2b_development_B5_c9a42fa_20260825/summary.json
+  p4_v2b_development_summary_sha256: c5805cf3c9e758279fdedc70ce3d48cc95ff7e6fab74c88eec7d55e561384d01
+
+selection:
+  calibration_episode_seeds: [554000, 554001, 554002, 554003, 554004, 554005, 554006, 554007, 554008, 554009, 554010, 554011, 554012, 554013, 554014, 554015, 554016, 554017, 554018, 554019]
+  engineering_episode_seeds: [556000, 556001, 556002, 556003, 556004]
+  ranking: b3_probability_desc_then_positive_b2_opportunity_desc_then_step_index_asc
+  quota_per_episode: 2
+  selection_probability_threshold: null
+  minimum_opportunity_threshold: null
+  require_positive_opportunity: true
+  full_budget_time_features: true
+  outcome_used_for_selection: false
+  per_action_affine_risk_calibrator_used: false
+  temporal_budget:
+    k: 8
+    min_gap: 2
+    window_size: 16
+    window_k: 2
+
+threat:
+  scope: PPO_policy_observation_only
+  epsilon_ratio: 6.0
+  effective_epsilon: [0.0, 0.30000001192092896, 0.30000001192092896, 0.30000001192092896, 0.30000001192092896, 0.30000001192092896, 0.30000001192092896, 0.0]
+  projector_contract_version: mergelite9-sensor-attack-v2
+  shared_clean_derived_schedule: true
+  schedule_matched_not_query_matched: true
+  solver_steps: 20
+  solver_restarts: 5
+
+conditions: [clean, fgsm_fixed_schedule, pgd20x5_fixed_schedule, mad20x5_fixed_schedule, stfa_v2c_top2_fixed_schedule]
+
+seed_boundary:
+  matched_seed_namespace: 557000..557049
+  future_final_seed_namespace: 558000..558049
+  matched_seeds_consumed: false
+  future_final_seeds_consumed: false
+
+claims:
+  formal_evaluation_eligible: false
+  formal_summary_eligible: false
+  effectiveness_claim_eligible: false
+  superiority_claim_eligible: false
+  statistical_significance_claimed: false
+  sumo_effectiveness_claimed: false
+  vanilla_problem_solved: false

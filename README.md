@@ -123,6 +123,13 @@ rl-attack-baseline --env-id CartPole-v1 --load-model artifacts/cartpole/model.zi
 rl-attack-defense --method sa_ppo --env-id CartPole-v1 --timesteps 50000 `
   --epsilon 0.02 --attack pgd --attack-steps 10
 rl-attack-p4-audit <resolved-p4-config.yaml> --output-dir outputs/p4_stfa_audit
+rl-attack-p4-v2c-engineering run `
+  configs/experiments/p4_mergelite9_v2c_matched_engineering.yaml `
+  --output-dir outputs/p4_v2c_engineering_<commit>_<date>
+rl-attack-p4-v2c-engineering verify `
+  configs/experiments/p4_mergelite9_v2c_matched_engineering.yaml `
+  --run outputs/p4_v2c_engineering_<commit>_<date> `
+  --expected-run-manifest-sha256 <printed_sha256>
 rl-attack-train-rapid-guard train --help
 rl-attack-train-rapid-guard verify --help
 rl-attack-p5-audit <resolved-p5-config.yaml> `
@@ -142,6 +149,10 @@ in `configs/experiments`.
 The adaptive-smoke command is intentionally test-scoped: it executes a real
 BPDA/purifier/Guard/environment chain but cannot establish attack strength or
 defense effectiveness.
+The P4-v2c command is likewise engineering-only. It replaces the failed v2b
+absolute timing gates with a clean-derived B3 top-2 schedule and compares
+FGSM/PGD/MAD/STFA on the same five seeds and schedule; it cannot establish
+statistical significance or attack superiority.
 
 ## Verification
 
