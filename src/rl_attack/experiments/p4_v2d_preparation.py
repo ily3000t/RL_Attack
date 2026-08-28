@@ -62,7 +62,7 @@ from rl_attack.training.stfa_trajectory_pipeline import (
 )
 
 P4_V2D_PREPARATION_CONFIG_SCHEMA = "rl_attack.p4_v2d_preparation_config.v1"
-P4_V2D_PREPARATION_MANIFEST_SCHEMA = "rl_attack.p4_v2d_preparation.v1"
+P4_V2D_PREPARATION_MANIFEST_SCHEMA = "rl_attack.p4_v2d_preparation.v2"
 P4_V2D_PREPARATION_VERIFY_SCHEMA = "rl_attack.p4_v2d_preparation_verification.v1"
 ENVIRONMENT_NAME = "RL_Attack_Core_Py310"
 CRITIC_EPISODE_SEEDS = tuple(range(559_100, 559_164))
@@ -525,6 +525,24 @@ def _load_parent(config: P4V2DPreparationConfig) -> Any:
     )
 
 
+def _stable_parent_binding(config: P4V2DPreparationConfig, runtime: Any) -> dict[str, Any]:
+    """Bind stable parent science/runtime identity, excluding verifier commit metadata."""
+    verified = runtime.verified
+    return {
+        "path": str(config.parent_preparation),
+        "manifest_sha256": PARENT_PREPARATION_MANIFEST_SHA256,
+        "preparation_contract_sha256": validate_sha256(
+            verified["preparation_contract_sha256"],
+            name="parent preparation contract sha256",
+        ),
+        "runtime_contract_sha256": validate_sha256(
+            verified["runtime_contract_sha256"],
+            name="parent runtime contract sha256",
+        ),
+        "runtime_pins_sha256": canonical_json_sha256(verified["runtime_pins"]),
+    }
+
+
 def prepare_p4_v2d(config_path: str | Path, *, output_directory: str | Path) -> dict[str, Any]:
     config = load_p4_v2d_preparation_config(config_path)
     threads = _configure_threads()
@@ -613,11 +631,7 @@ def prepare_p4_v2d(config_path: str | Path, *, output_directory: str | Path) -> 
                 "path": str(config.source_path),
                 "sha256": config.source_sha256,
             },
-            "parent_preparation": {
-                "path": str(config.parent_preparation),
-                "manifest_sha256": PARENT_PREPARATION_MANIFEST_SHA256,
-                "verified_bundle_sha256": runtime.verified["sha256"],
-            },
+            "parent_preparation": _stable_parent_binding(config, runtime),
             "victim": {
                 "checkpoint_sha256": runtime.frozen.checkpoint_sha256,
                 "policy_state_sha256": runtime.frozen.policy_state_sha256,
@@ -786,11 +800,7 @@ def verify_p4_v2d_preparation(
     runtime = _load_parent(config)
     if not _json_exact(
         manifest["parent_preparation"],
-        {
-            "path": str(config.parent_preparation),
-            "manifest_sha256": PARENT_PREPARATION_MANIFEST_SHA256,
-            "verified_bundle_sha256": runtime.verified["sha256"],
-        },
+        _stable_parent_binding(config, runtime),
     ):
         raise InvalidP4V2DPreparation("parent preparation binding differs")
     if not _json_exact(

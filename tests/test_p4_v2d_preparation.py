@@ -13,6 +13,7 @@ from rl_attack.experiments.p4_v2d_preparation import (
     InvalidP4V2DPreparation,
     _dataset_manifest_record,
     _json_exact,
+    _stable_parent_binding,
     _strict_json,
     load_p4_v2d_preparation_config,
 )
@@ -60,6 +61,31 @@ def test_dataset_manifest_uses_public_training_batch_api() -> None:
         "training_batch_sha256": "a" * 64,
         "binding": {"dataset_sha256": "b" * 64},
     }
+
+
+def test_parent_binding_excludes_forward_integration_commit_metadata() -> None:
+    config = load_p4_v2d_preparation_config(CONFIG)
+    stable = {
+        "preparation_contract_sha256": "a" * 64,
+        "runtime_contract_sha256": "b" * 64,
+        "runtime_pins": {"victim": "c" * 64},
+    }
+    first = SimpleNamespace(
+        verified=stable
+        | {
+            "sha256": "d" * 64,
+            "source_verification": {"current_git_commit": "1" * 40},
+        }
+    )
+    second = SimpleNamespace(
+        verified=stable
+        | {
+            "sha256": "e" * 64,
+            "source_verification": {"current_git_commit": "2" * 40},
+        }
+    )
+    assert _stable_parent_binding(config, first) == _stable_parent_binding(config, second)
+    assert "verified_bundle_sha256" not in _stable_parent_binding(config, first)
 
 
 def test_v2d_preparation_rejects_duplicate_yaml_key(tmp_path: Path) -> None:
