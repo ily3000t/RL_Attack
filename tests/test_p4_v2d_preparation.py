@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -10,6 +11,7 @@ from rl_attack.experiments.p4_v2d_preparation import (
     FUTURE_FINAL_EPISODE_SEEDS,
     MATCHED_EPISODE_SEEDS,
     InvalidP4V2DPreparation,
+    _dataset_manifest_record,
     _json_exact,
     _strict_json,
     load_p4_v2d_preparation_config,
@@ -44,6 +46,20 @@ def test_checked_v2d_preparation_config_freezes_contract_and_seed_boundary() -> 
     )
     assert len(CRITIC_EPISODE_SEEDS) == 64
     assert ENGINEERING_EPISODE_SEEDS == tuple(range(559000, 559005))
+
+
+def test_dataset_manifest_uses_public_training_batch_api() -> None:
+    training_batch = SimpleNamespace(sha256=lambda: "a" * 64)
+    dataset = SimpleNamespace(
+        arrays=SimpleNamespace(rows=7),
+        dataset_binding={"dataset_sha256": "b" * 64},
+        to_training_batch=lambda: training_batch,
+    )
+    assert _dataset_manifest_record(dataset) == {
+        "rows": 7,
+        "training_batch_sha256": "a" * 64,
+        "binding": {"dataset_sha256": "b" * 64},
+    }
 
 
 def test_v2d_preparation_rejects_duplicate_yaml_key(tmp_path: Path) -> None:

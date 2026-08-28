@@ -463,6 +463,15 @@ def _repository_record() -> dict[str, Any]:
     return {"git_commit": commit, "git_clean": status == "", "git_status": status}
 
 
+def _dataset_manifest_record(dataset: Any) -> dict[str, Any]:
+    """Bind the persisted dataset through its public training-batch API."""
+    return {
+        "rows": dataset.arrays.rows,
+        "training_batch_sha256": dataset.to_training_batch().sha256(),
+        "binding": dataset.dataset_binding,
+    }
+
+
 def _configure_threads() -> dict[str, Any]:
     if os.environ.get("RL_ATTACK_P4_V2B_PREIMPORT_THREADS") != "1" or os.environ.get(
         "RL_ATTACK_P4_V2B_PRELOADED_MODULES"
@@ -622,11 +631,7 @@ def prepare_p4_v2d(config_path: str | Path, *, output_directory: str | Path) -> 
                 "future_final_reserved": list(FUTURE_FINAL_EPISODE_SEEDS),
                 "evaluation_consumed": False,
             },
-            "dataset": {
-                "rows": arrays.rows,
-                "training_batch_sha256": dataset.training_batch.sha256(),
-                "binding": dataset.dataset_binding,
-            },
+            "dataset": _dataset_manifest_record(dataset),
             "critic_binding": binding,
             "training": {
                 "final_train_loss": training.final_train_loss,
