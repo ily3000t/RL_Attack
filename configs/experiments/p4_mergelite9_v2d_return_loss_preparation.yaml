@@ -1,0 +1,46 @@
+schema_version: rl_attack.p4_v2d_preparation_config.v1
+name: p4_mergelite9_v2d_short_return_loss
+environment_name: RL_Attack_Core_Py310
+
+parent:
+  preparation: outputs/p4_mergelite9_v2b_prepared_7d0b72f_20260825
+  manifest_sha256: f134cb53245a2573235357ce9da90424d48e3dc4e2c2107cf52982d3783788d0
+
+short_return_loss:
+  label_formula: E_r[(G_clean-G_a)_+/25]
+  replicate_aggregation: mean_positive_part_paired_crn
+  horizon: 12
+  discount: 0.99
+  replicates: 4
+  return_scale: 25.0
+  safety_scale: 10.0
+  return_weight: 1.0
+  merge_failure_weight: 0.0
+  safety_weight: 0.0
+
+collection:
+  start_seed: 559100
+  episodes: 64
+
+training:
+  hidden_sizes: [128, 128]
+  epochs: 40
+  batch_size: 128
+  model_seed: 547001
+
+threat:
+  epsilon_ratio: 6.0
+
+seed_boundary:
+  engineering: [559000, 559001, 559002, 559003, 559004]
+  matched_reserved: [559300, 559349]
+  future_final_reserved: [559400, 559449]
+  pairwise_disjoint: true
+
+claims:
+  formal_evaluation_eligible: false
+  effectiveness_claim_eligible: false
+  superiority_claim_eligible: false
+  statistical_significance_claimed: false
+  sumo_effectiveness_claimed: false
+  vanilla_problem_solved: false

@@ -130,6 +130,18 @@ rl-attack-p4-v2c-engineering verify `
   configs/experiments/p4_mergelite9_v2c_matched_engineering.yaml `
   --run outputs/p4_v2c_engineering_<commit>_<date> `
   --expected-run-manifest-sha256 <printed_sha256>
+rl-attack-p4-v2d-prepare prepare `
+  configs/experiments/p4_mergelite9_v2d_return_loss_preparation.yaml `
+  --output-dir outputs/p4_v2d_return_prepared_<commit>_<date>
+rl-attack-p4-v2d-prepare verify `
+  configs/experiments/p4_mergelite9_v2d_return_loss_preparation.yaml `
+  --preparation outputs/p4_v2d_return_prepared_<commit>_<date> `
+  --expected-manifest-sha256 <printed_sha256>
+rl-attack-p4-v2d-engineering run <bound-v2d-engineering.yaml> `
+  --output-dir outputs/p4_v2d_return_engineering_<commit>_<date>
+rl-attack-p4-v2d-engineering verify <bound-v2d-engineering.yaml> `
+  --run outputs/p4_v2d_return_engineering_<commit>_<date> `
+  --expected-manifest-sha256 <printed_sha256>
 rl-attack-train-rapid-guard train --help
 rl-attack-train-rapid-guard verify --help
 rl-attack-p5-audit <resolved-p5-config.yaml> `
@@ -153,6 +165,15 @@ The P4-v2c command is likewise engineering-only. It replaces the failed v2b
 absolute timing gates with a clean-derived B3 top-2 schedule and compares
 FGSM/PGD/MAD/STFA on the same five seeds and schedule; it cannot establish
 statistical significance or attack superiority.
+P4-v2d is also claim-ineligible. It trains a dedicated nine-output H=12/R=4
+critic only on `E_r[(G_clean-G_a)_+/25]`; failure and safety labels have no
+head, loss, or shared-backbone gradient path. A noncausal clean-episode
+engineering selector uses predicted return opportunity to choose two feasible
+times, while the 20x5 inner solver maximizes categorical expected return loss.
+The victim still executes deterministic argmax, so this surrogate mismatch is
+reported rather than hidden. Merge failure and safety cost remain report-only
+endpoints, and the five-seed scale-up gate cannot be passed by safety
+degradation or action flips alone.
 
 ## Verification
 
