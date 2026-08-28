@@ -3,9 +3,9 @@
 状态：**P4 v2d 算法、preparation、engineering runner 与 verifier 已落实；正式
 preparation 已完成并通过完整 replay，5-seed 工程结果待运行。**
 
-已验证 preparation：`outputs/p4_v2d_return_prepared_f659c55_20260828`，1704 条 critic
+已验证 preparation：`outputs/p4_v2d_return_prepared_880836a_20260828`，1704 条 critic
 rows，manifest SHA-256 为
-`04a3cd3e28952b1d1fe66747491fb92a9b76aa103434f95f8b74299cb5cdc415`；artifact、
+`6ba2f1202140c0681d598506769e77dc6c37d6b893c3be50a5e1432fa8fe4eaa`；artifact、
 critic、victim 与 counterfactual collection replay 均已验证。
 
 ## 本次修改说明

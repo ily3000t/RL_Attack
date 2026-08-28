@@ -60,10 +60,10 @@ def test_engineering_strict_json_rejects_duplicates_and_type_confusion() -> None
 def test_checked_engineering_config_binds_verified_preparation() -> None:
     config = load_p4_v2d_engineering_config(ENGINEERING_CONFIG)
     record = config.to_record()
-    assert config.preparation.name == "p4_v2d_return_prepared_f659c55_20260828"
+    assert config.preparation.name == "p4_v2d_return_prepared_880836a_20260828"
     assert (
         config.preparation_manifest_sha256
-        == "04a3cd3e28952b1d1fe66747491fb92a9b76aa103434f95f8b74299cb5cdc415"
+        == "6ba2f1202140c0681d598506769e77dc6c37d6b893c3be50a5e1432fa8fe4eaa"
     )
     assert record["episode_seeds"] == [559000, 559001, 559002, 559003, 559004]
     assert record["outcome_gate"]["each_seed_reachable_attack_minimum"] == 1
