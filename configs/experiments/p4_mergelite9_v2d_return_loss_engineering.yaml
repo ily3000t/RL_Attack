@@ -1,0 +1,85 @@
+schema_version: rl_attack.p4_v2d_engineering_config.v1
+name: p4_mergelite9_v2d_return_loss_engineering
+environment_name: RL_Attack_Core_Py310
+
+parent:
+  path: outputs/p4_mergelite9_v2b_prepared_7d0b72f_20260825
+  manifest_sha256: f134cb53245a2573235357ce9da90424d48e3dc4e2c2107cf52982d3783788d0
+
+preparation:
+  config: configs/experiments/p4_mergelite9_v2d_return_loss_preparation.yaml
+  path: outputs/p4_v2d_return_prepared_f659c55_20260828
+  manifest_sha256: 04a3cd3e28952b1d1fe66747491fb92a9b76aa103434f95f8b74299cb5cdc415
+
+cohort:
+  episode_seeds: [559000, 559001, 559002, 559003, 559004]
+  matched_reserved: [559300, 559349]
+  future_final_reserved: [559400, 559449]
+
+threat:
+  scope: PPO_policy_observation_only
+  epsilon_ratio: 6.0
+  projector: MergeLite9_sensor_v2
+
+objective:
+  contract_sha256: dbe8a90a07b97f7b9dcb14c12396f21f999417a734988c50e88696a6db0d67db
+  steps: 20
+  restarts: 5
+  shared_restart_plan: true
+
+selector:
+  role: noncausal_clean_episode_engineering_director
+  causal_online: false
+  critic_primitive: discounted_return_drop
+  target_reachability: victim_top3_nonclean
+  target_ranking: predicted_return_loss_desc_then_action_asc
+  target_field_role: opportunity_probe_action_not_inner_objective_target
+  time_opportunity: max(target_return_loss-clean_action_return_loss,0)
+  time_ranking: feasible_pair_total_return_opportunity_desc_then_min_opportunity_desc_then_steps_asc
+  quota: 2
+  require_positive_opportunity: true
+  temporal_budget:
+    k: 8
+    min_gap: 2
+    window_size: 16
+    window_k: 2
+  B3_used: false
+  safety_primitive_used: false
+  merge_failure_primitive_used: false
+  inner_objective_targeted: false
+  inner_objective_policy_surrogate: categorical_expected_return_loss
+  victim_execution: deterministic_argmax
+  outcome_used: false
+
+conditions:
+  - clean
+  - fgsm_fixed_schedule
+  - pgd20x5_fixed_schedule
+  - mad20x5_fixed_schedule
+  - stfa_v2c_composite_on_v2d_schedule
+  - stfa_v2d_return_loss_fixed_schedule
+
+outcome_gate:
+  primary_metric: signed_paired_discounted_return_drop
+  structural_integrity_required: true
+  each_seed_reachable_attack_minimum: 1
+  all_reachable_attacks_nonzero_required_for_scale_up: true
+  mean_strictly_positive: true
+  median_strictly_positive: true
+  positive_seed_count_minimum: 3
+  legacy_comparator: median_of_paired_v2d_minus_v2c_composite_drop_strictly_positive
+  legacy_comparator_is_objective_isolated_ablation: false
+  safety_can_pass: false
+  merge_failure_can_pass: false
+  collision_can_pass: false
+  action_flip_can_pass: false
+
+claims:
+  formal_evaluation_eligible: false
+  formal_summary_eligible: false
+  effectiveness_claim_eligible: false
+  superiority_claim_eligible: false
+  statistical_significance_claimed: false
+  sumo_effectiveness_claimed: false
+  vanilla_problem_solved: false
+  causal_online_director_claimed: false

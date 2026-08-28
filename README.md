@@ -137,9 +137,11 @@ rl-attack-p4-v2d-prepare verify `
   configs/experiments/p4_mergelite9_v2d_return_loss_preparation.yaml `
   --preparation outputs/p4_v2d_return_prepared_<commit>_<date> `
   --expected-manifest-sha256 <printed_sha256>
-rl-attack-p4-v2d-engineering run <bound-v2d-engineering.yaml> `
+rl-attack-p4-v2d-engineering run `
+  configs/experiments/p4_mergelite9_v2d_return_loss_engineering.yaml `
   --output-dir outputs/p4_v2d_return_engineering_<commit>_<date>
-rl-attack-p4-v2d-engineering verify <bound-v2d-engineering.yaml> `
+rl-attack-p4-v2d-engineering verify `
+  configs/experiments/p4_mergelite9_v2d_return_loss_engineering.yaml `
   --run outputs/p4_v2d_return_engineering_<commit>_<date> `
   --expected-manifest-sha256 <printed_sha256>
 rl-attack-train-rapid-guard train --help

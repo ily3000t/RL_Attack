@@ -1,7 +1,12 @@
 # P4 v2d 短反事实回报损失攻击：目标与实现已落实
 
 状态：**P4 v2d 算法、preparation、engineering runner 与 verifier 已落实；正式
-preparation 和 5-seed 工程结果待运行。**
+preparation 已完成并通过完整 replay，5-seed 工程结果待运行。**
+
+已验证 preparation：`outputs/p4_v2d_return_prepared_f659c55_20260828`，1704 条 critic
+rows，manifest SHA-256 为
+`04a3cd3e28952b1d1fe66747491fb92a9b76aa103434f95f8b74299cb5cdc415`；artifact、
+critic、victim 与 counterfactual collection replay 均已验证。
 
 ## 本次修改说明
 

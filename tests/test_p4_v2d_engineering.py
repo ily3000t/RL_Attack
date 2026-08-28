@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -13,8 +14,12 @@ from rl_attack.experiments.p4_v2d_engineering import (
     _build_summary,
     _json_exact,
     _strict_json,
+    load_p4_v2d_engineering_config,
     rank_return_top2_schedule,
 )
+
+ROOT = Path(__file__).resolve().parents[1]
+ENGINEERING_CONFIG = ROOT / "configs/experiments/p4_mergelite9_v2d_return_loss_engineering.yaml"
 
 
 def _row(step: int, opportunity: float) -> dict[str, Any]:
@@ -50,6 +55,18 @@ def test_engineering_strict_json_rejects_duplicates_and_type_confusion() -> None
         _strict_json(b'{"field": 1, "field": 2}', name="test payload")
     assert _json_exact({"field": False}, {"field": 0}) is False
     assert _json_exact({"field": 1}, {"field": 1.0}) is False
+
+
+def test_checked_engineering_config_binds_verified_preparation() -> None:
+    config = load_p4_v2d_engineering_config(ENGINEERING_CONFIG)
+    record = config.to_record()
+    assert config.preparation.name == "p4_v2d_return_prepared_f659c55_20260828"
+    assert (
+        config.preparation_manifest_sha256
+        == "04a3cd3e28952b1d1fe66747491fb92a9b76aa103434f95f8b74299cb5cdc415"
+    )
+    assert record["episode_seeds"] == [559000, 559001, 559002, 559003, 559004]
+    assert record["outcome_gate"]["each_seed_reachable_attack_minimum"] == 1
 
 
 def test_return_selector_enforces_temporal_ledger_and_exact_top2() -> None:
