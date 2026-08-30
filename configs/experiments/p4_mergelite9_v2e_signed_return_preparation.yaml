@@ -1,0 +1,71 @@
+schema_version: rl_attack.p4_v2e_preparation_config.v1
+name: p4_mergelite9_v2e_signed_return
+environment_name: RL_Attack_Core_Py310
+
+parent:
+  preparation: outputs/p4_mergelite9_v2b_prepared_7d0b72f_20260825
+  manifest_sha256: f134cb53245a2573235357ce9da90424d48e3dc4e2c2107cf52982d3783788d0
+
+signed_return:
+  label_formula: E_r[(G_clean-G_a)/25]
+  replicate_aggregation: mean_paired_crn_no_clipping
+  horizon: 12
+  discount: 0.99
+  replicates: 4
+  return_scale: 25.0
+  clean_action_anchor: exact_zero
+  failure_weight: 0.0
+  safety_weight: 0.0
+
+collection:
+  train_episode_seeds: [559200, 559201, 559202, 559203, 559204, 559205, 559206, 559207, 559208, 559209, 559210, 559211, 559212, 559213, 559214, 559215, 559216, 559217, 559218, 559219, 559220, 559221, 559222, 559223, 559224, 559225, 559226, 559227, 559228, 559229, 559230, 559231, 559232, 559233, 559234, 559235, 559236, 559237, 559238, 559239, 559240, 559241, 559242, 559243, 559244, 559245, 559246, 559247]
+  heldout_episode_seeds: [559248, 559249, 559250, 559251, 559252, 559253, 559254, 559255, 559256, 559257, 559258, 559259, 559260, 559261, 559262, 559263]
+
+training:
+  hidden_sizes: [128, 128]
+  epochs: 80
+  batch_size: 128
+  model_seed: 547004
+  smooth_l1_beta: 0.04
+  value_loss_weight: 1.0
+  pair_gap_loss_weight: 1.0
+  heldout_early_stopping: false
+
+adequacy_gate:
+  heldout_rows_minimum: 300
+  runtime_eligible_rows_minimum: 200
+  positive_nonclean_label_fraction_minimum: 0.05
+  negative_nonclean_label_fraction_minimum: 0.05
+  tie_tolerance: 0.002
+  near_optimal_top1_minimum: 0.35
+  top1_baseline_advantage_minimum: 0.05
+  pairwise_concordance_minimum: 0.65
+  pairwise_baseline_advantage_minimum: 0.05
+  opportunity_nmae_maximum: 0.75
+  selected_oracle_positive_fraction_minimum: 0.75
+  solver_objective_gradient_fraction_minimum: 0.95
+
+threat:
+  epsilon_ratio: 6.0
+  solver_steps: 20
+  solver_restarts: 5
+  objective_variant: flat
+  expected_signed_return_weight: 1.0
+  joint_target_margin_weight: 1.0
+  margin_kappa: 0.0
+
+seed_boundary:
+  engineering: [559010, 559011, 559012, 559013, 559014]
+  matched_reserved: [559300, 559349]
+  future_final_reserved: [559400, 559449]
+  pairwise_disjoint: true
+
+claims:
+  formal_evaluation_eligible: false
+  formal_summary_eligible: false
+  effectiveness_claim_eligible: false
+  superiority_claim_eligible: false
+  statistical_significance_claimed: false
+  sumo_effectiveness_claimed: false
+  vanilla_problem_solved: false
+  causal_online_director_claimed: false

@@ -144,6 +144,21 @@ rl-attack-p4-v2d-engineering verify `
   configs/experiments/p4_mergelite9_v2d_return_loss_engineering.yaml `
   --run outputs/p4_v2d_return_engineering_<commit>_<date> `
   --expected-manifest-sha256 <printed_sha256>
+rl-attack-p4-v2e-prepare prepare `
+  configs/experiments/p4_mergelite9_v2e_signed_return_preparation.yaml `
+  --output-dir outputs/p4_v2e_signed_prepared_<commit>_<date>
+rl-attack-p4-v2e-prepare verify `
+  configs/experiments/p4_mergelite9_v2e_signed_return_preparation.yaml `
+  --preparation outputs/p4_v2e_signed_prepared_<commit>_<date> `
+  --expected-manifest-sha256 <printed_sha256>
+# Run only when the full preparation verification reports engineering_unlocked=true.
+rl-attack-p4-v2e-engineering run `
+  configs/experiments/p4_mergelite9_v2e_signed_return_engineering.yaml `
+  --output-dir outputs/p4_v2e_signed_engineering_<commit>_<date>
+rl-attack-p4-v2e-engineering verify `
+  configs/experiments/p4_mergelite9_v2e_signed_return_engineering.yaml `
+  --run outputs/p4_v2e_signed_engineering_<commit>_<date> `
+  --expected-manifest-sha256 <printed_sha256>
 rl-attack-train-rapid-guard train --help
 rl-attack-train-rapid-guard verify --help
 rl-attack-p5-audit <resolved-p5-config.yaml> `
@@ -176,6 +191,16 @@ The victim still executes deterministic argmax, so this surrogate mismatch is
 reported rather than hidden. Merge failure and safety cost remain report-only
 endpoints, and the five-seed scale-up gate cannot be passed by safety
 degradation or action flips alone.
+P4-v2e is a separate claim-ineligible successor and does not rewrite v2d. Its
+offline labels are signed paired short-return differences
+`E_r[(G_clean-G_a)/25]` with no clipping or safety/failure mixture. The
+clean-trajectory probe selects two fixed times; at each reached time the formal
+runtime director reselects a strictly positive non-clean target on the current
+local clean observation using the already-paid critic vector. A selected 20x5
+solver step has the exact native query vector `107/100/106/1/1=315`
+(observation/gradient/projection/critic/director). The preparation adequacy and
+real detached-q FLAT solver-gradient gates must both pass before the five
+one-shot engineering seeds may be consumed.
 
 ## Verification
 
