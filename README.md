@@ -201,6 +201,10 @@ solver step has the exact native query vector `107/100/106/1/1=315`
 (observation/gradient/projection/critic/director). The preparation adequacy and
 real detached-q FLAT solver-gradient gates must both pass before the five
 one-shot engineering seeds may be consumed.
+The first frozen v2e preparation passed full replay and the solver-gradient
+gate but failed the offline critic opportunity-NMAE gate, so its engineering
+seeds remain unconsumed; see
+[`docs/results/P4_V2E_SIGNED_RETURN_PREPARATION_20260831.md`](docs/results/P4_V2E_SIGNED_RETURN_PREPARATION_20260831.md).
 
 ## Verification
 

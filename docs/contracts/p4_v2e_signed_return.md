@@ -1,6 +1,9 @@
 # P4 v2e 有符号短反事实回报攻击：冻结工程契约
 
-状态：**目标、数据、critic、selector、比较矩阵与 gate 已预注册；尚未产生工程效果结论。**
+状态：**目标、数据、critic、selector、比较矩阵与 gate 已预注册；preparation 已完整
+验证但 offline critic adequacy 未通过，engineering 未解锁，尚未产生工程效果结论。**
+
+运行记录见 `docs/results/P4_V2E_SIGNED_RETURN_PREPARATION_20260831.md`。
 
 P4 v2e 是 v2d 的独立后继版本，不覆盖或修改 v2d 的已签名源码和结果。它修复 v2d
 把负动作效应裁剪为零、动作排序弱，以及 categorical expected-loss 与 deterministic
