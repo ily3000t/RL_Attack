@@ -1,0 +1,148 @@
+schema_version: rl_attack.p4_v2e_postgate_diagnostic_config.v1
+name: p4_mergelite9_v2e_postgate_diagnostic
+environment_name: RL_Attack_Core_Py310
+
+parent:
+  path: outputs/p4_mergelite9_v2b_prepared_7d0b72f_20260825
+  manifest_sha256: f134cb53245a2573235357ce9da90424d48e3dc4e2c2107cf52982d3783788d0
+
+preparation:
+  config: configs/experiments/p4_mergelite9_v2e_signed_return_preparation.yaml
+  config_sha256: 5959430b9c0084951807819fc7f55273988934aa07d98476c041595f768d0bc9
+  path: outputs/p4_v2e_signed_prepared_610601e_20260830
+  manifest_sha256: 8fbf3dec0e461ff02c06dace869f954ed14f49371af2d22b6532c657ece7c83a
+
+legacy_v2d_preparation:
+  config: configs/experiments/p4_mergelite9_v2d_return_loss_preparation.yaml
+  path: outputs/p4_v2d_return_prepared_880836a_20260828
+  manifest_sha256: 6ba2f1202140c0681d598506769e77dc6c37d6b893c3be50a5e1432fa8fe4eaa
+
+cohort:
+  diagnostic_episode_seeds: [559500, 559501, 559502, 559503, 559504]
+  protected_seed_ranges:
+    v2d_engineering_consumed: [559000, 559004]
+    v2e_formal_engineering_unconsumed: [559010, 559011, 559012, 559013, 559014]
+    v2d_critic_consumed: [559100, 559163]
+    v2e_critic_consumed: [559200, 559263]
+    matched_reserved: [559300, 559349]
+    future_final_reserved: [559400, 559449]
+  pairwise_disjoint: true
+  fixed_cohort_no_posthoc_reselection: true
+
+threat:
+  scope: PPO_policy_observation_only
+  epsilon_ratio: 6.0
+  projector: MergeLite9_sensor_v2
+
+objective:
+  contract_sha256: 578ab69542f87cd0df0450e676cb7eeea00dd28a6ce7d53070875fcb67db5e32
+  steps: 20
+  restarts: 5
+  shared_restart_plan: true
+
+selector:
+  role: noncausal_clean_episode_engineering_director
+  causal_online: false
+  critic_primitive: paired_signed_discounted_return_difference
+  target_reachability: all_available_nonclean_actions
+  probe_target_ranking: global_max_positive_signed_loss_then_action_asc
+  target_field_role: clean_schedule_probe_only
+  time_opportunity: predicted_signed_loss_times_exp_min_target_minus_best_other_logit_zero
+  time_ranking: feasible_pair_total_timing_score_desc_then_min_score_desc_then_steps_asc
+  quota: 2
+  require_positive_opportunity: true
+  temporal_budget:
+    k: 8
+    min_gap: 2
+    window_size: 16
+    window_k: 2
+  B3_used: false
+  safety_primitive_used: false
+  merge_failure_primitive_used: false
+  inner_objective_targeted: true
+  runtime_target_rule: same_paid_signed_critic_vector_global_positive_available_nonclean_argmax
+  runtime_target_reselected_at_fixed_timing: true
+  probe_target_used_by_inner_solver: false
+  extra_runtime_target_critic_queries: 0
+  inner_objective_policy_surrogate: flat_target_logit_margin_plus_signed_categorical_expectation
+  victim_execution: deterministic_argmax
+  outcome_used: false
+
+conditions:
+  - clean
+  - random_fixed_schedule
+  - fgsm_fixed_schedule
+  - pgd20x5_fixed_schedule
+  - mad20x5_fixed_schedule
+  - stfa_v2c_composite_on_v2e_schedule
+  - stfa_v2d_positive_part_on_v2e_schedule
+  - stfa_v2e_signed_return_fixed_timing
+
+failed_preparation_gate:
+  critic_adequacy_pass: false
+  full_replay_required_before_diagnostic: true
+  fingerprint:
+    schema_version: rl_attack.p4_v2e_engineering_unlock.v1
+    checks:
+      offline_critic_adequacy: false
+      solver_objective_gradient_fraction: true
+    critic_adequacy_sha256: 43c7c57069eb84649c1d24aa3ea700cef9633d502100b3ba98ed4914cafe380d
+    engineering_unlocked: false
+    failed_checks: [offline_critic_adequacy]
+    sha256: 1ffa384797c03f340a053e3bf34c23d985095df47bb7b69a2d9a687900faffcc
+    solver_objective_gradient_probe_sha256: d2119ab45bf1343ddfe36a766fb3f8c73d9e87773d8166939b97d0896b22264f
+    sources:
+      - critic_manifest.training.adequacy
+      - preparation.training.solver_objective_gradient_probe
+
+scope:
+  post_gate_exploratory: true
+  diagnostic_only: true
+  diagnostic_continuation_authorized_by_user: true
+  formal_runner_invoked: false
+  formal_scale_up_authorized: false
+
+outcome_gate:
+  positive_tolerance: 1.0e-06
+  primary_metric: signed_paired_discounted_return_drop
+  structural_integrity_required: true
+  each_seed_reachable_attack_minimum: 1
+  all_reachable_attacks_nonzero_required_for_scale_up: true
+  runtime_target_nonclean_required: true
+  runtime_target_strictly_positive_required: true
+  runtime_target_critic_vector_reuse_required: true
+  runtime_target_extra_critic_queries: 0
+  physical_shared_schedule_query_charged_once: true
+  per_condition_schedule_queries_are_logical_attribution_only: true
+  query_ledger_closure_required: true
+  mean_above_tolerance: true
+  median_above_tolerance: true
+  positive_seed_count_minimum: 4
+  leave_one_out_mean_minimum_above_tolerance: true
+  maximum_positive_mass_share: 0.5
+  comparator_envelope:
+    - fgsm_fixed_schedule
+    - pgd20x5_fixed_schedule
+    - mad20x5_fixed_schedule
+    - stfa_v2c_composite_on_v2e_schedule
+    - stfa_v2d_positive_part_on_v2e_schedule
+  paired_advantage_mean_above_tolerance: true
+  paired_advantage_median_above_tolerance: true
+  paired_advantage_positive_seed_count_minimum: 3
+  paired_advantage_leave_one_out_mean_minimum_above_tolerance: true
+  paired_advantage_maximum_positive_mass_share: 0.5
+  comparator_is_objective_isolated_ablation: false
+  safety_can_pass: false
+  merge_failure_can_pass: false
+  collision_can_pass: false
+  action_flip_can_pass: false
+
+claims:
+  formal_evaluation_eligible: false
+  formal_summary_eligible: false
+  effectiveness_claim_eligible: false
+  superiority_claim_eligible: false
+  statistical_significance_claimed: false
+  sumo_effectiveness_claimed: false
+  vanilla_problem_solved: false
+  causal_online_director_claimed: false

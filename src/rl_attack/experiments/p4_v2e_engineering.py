@@ -83,6 +83,7 @@ from rl_attack.training.robust_sarsa import sb3_policy_state_sha256
 P4_V2E_ENGINEERING_CONFIG_SCHEMA = "rl_attack.p4_v2e_engineering_config.v1"
 P4_V2E_ENGINEERING_MANIFEST_SCHEMA = "rl_attack.p4_v2e_engineering_run.v1"
 P4_V2E_ENGINEERING_SUMMARY_SCHEMA = "rl_attack.p4_v2e_engineering_summary.v1"
+P4_V2E_MATRIX_SUMMARY_SCHEMA = "rl_attack.p4_v2e_comparison_matrix_summary.v1"
 P4_V2E_ENGINEERING_VERIFY_SCHEMA = "rl_attack.p4_v2e_engineering_verification.v1"
 ENGINEERING_EPISODE_SEEDS = tuple(range(559_010, 559_015))
 PARENT_PREPARATION_MANIFEST_SHA256 = (
@@ -1190,15 +1191,38 @@ def _query(value: Mapping[str, Any]) -> QueryVector:
     return query
 
 
+def _matrix_episode_seeds(value: Sequence[int]) -> tuple[int, ...]:
+    seeds = tuple(value)
+    if (
+        len(seeds) != 5
+        or any(type(seed) is not int or seed < 0 for seed in seeds)
+        or len(set(seeds)) != len(seeds)
+        or tuple(sorted(seeds)) != seeds
+    ):
+        raise InvalidP4V2EEngineering(
+            "matrix episode seeds must be five unique ascending non-negative integers"
+        )
+    return seeds
+
+
 def _condition_summary(
-    episodes: Sequence[Mapping[str, Any]], condition: str
+    episodes: Sequence[Mapping[str, Any]],
+    condition: str,
+    *,
+    episode_seeds: Sequence[int] = ENGINEERING_EPISODE_SEEDS,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    seeds = _matrix_episode_seeds(episode_seeds)
     rows = sorted(
         (row for row in episodes if row["condition"] == condition),
         key=lambda row: int(row["episode_seed"]),
     )
     clean = {int(row["episode_seed"]): row for row in episodes if row["condition"] == "clean"}
-    if len(rows) != len(ENGINEERING_EPISODE_SEEDS) or len(clean) != len(ENGINEERING_EPISODE_SEEDS):
+    if (
+        len(rows) != len(seeds)
+        or len(clean) != len(seeds)
+        or {int(row["episode_seed"]) for row in rows} != set(seeds)
+        or set(clean) != set(seeds)
+    ):
         raise InvalidP4V2EEngineering("engineering episode matrix is incomplete")
     per_seed: list[dict[str, Any]] = []
     signed_drops: list[float] = []
@@ -1296,15 +1320,18 @@ def _validate_step_evidence(
     schedules: Sequence[Mapping[str, Any]],
     episodes: Sequence[Mapping[str, Any]],
     steps: Sequence[Mapping[str, Any]],
+    *,
+    episode_seeds: Sequence[int] = ENGINEERING_EPISODE_SEEDS,
 ) -> dict[str, Any]:
     """Close physical/logical query ledgers and the live v2e target contract."""
 
+    seeds = _matrix_episode_seeds(episode_seeds)
     schedule_by_seed = {int(row["episode_seed"]): row for row in schedules}
-    if set(schedule_by_seed) != set(ENGINEERING_EPISODE_SEEDS):
+    if set(schedule_by_seed) != set(seeds):
         raise InvalidP4V2EEngineering("step evidence schedule identity differs")
     episode_by_key = {(str(row["condition"]), int(row["episode_seed"])): row for row in episodes}
     expected_episode_keys = {
-        (condition, seed) for condition in CONDITIONS for seed in ENGINEERING_EPISODE_SEEDS
+        (condition, seed) for condition in CONDITIONS for seed in seeds
     }
     if set(episode_by_key) != expected_episode_keys:
         raise InvalidP4V2EEngineering("step evidence episode identity differs")
@@ -1321,7 +1348,7 @@ def _validate_step_evidence(
         if (
             condition not in CONDITIONS
             or type(seed) is not int
-            or seed not in ENGINEERING_EPISODE_SEEDS
+            or seed not in seeds
             or type(step_index) is not int
             or step_index < 0
         ):
@@ -1509,27 +1536,35 @@ def _validate_step_evidence(
         "physical_shared_schedule_queries": physical_shared.to_record(),
         "logical_per_condition_schedule_query_attribution": (logical_attribution.to_record()),
         "native_execution_queries": native_execution.to_record(),
+        "experiment_physical_queries": (physical_shared + native_execution).to_record(),
         "per_seed": per_seed,
     }
 
 
-def _build_summary(
+def _build_matrix_summary(
     schedules: Sequence[Mapping[str, Any]],
     episodes: Sequence[Mapping[str, Any]],
     steps: Sequence[Mapping[str, Any]],
+    *,
+    episode_seeds: Sequence[int],
 ) -> dict[str, Any]:
-    step_evidence = _validate_step_evidence(schedules, episodes, steps)
+    seeds = _matrix_episode_seeds(episode_seeds)
+    step_evidence = _validate_step_evidence(
+        schedules, episodes, steps, episode_seeds=seeds
+    )
     condition_summaries: dict[str, Any] = {}
     per_seed: list[dict[str, Any]] = []
     for condition in CONDITIONS:
-        summary, rows = _condition_summary(episodes, condition)
+        summary, rows = _condition_summary(
+            episodes, condition, episode_seeds=seeds
+        )
         condition_summaries[condition] = summary
         per_seed.extend(rows)
     return_summary = condition_summaries[STFA_RETURN_CONDITION]
-    if len(schedules) != len(ENGINEERING_EPISODE_SEEDS):
+    if len(schedules) != len(seeds):
         raise InvalidP4V2EEngineering("engineering schedule matrix is incomplete")
     schedule_by_seed = {int(schedule["episode_seed"]): schedule for schedule in schedules}
-    if set(schedule_by_seed) != set(ENGINEERING_EPISODE_SEEDS) or any(
+    if set(schedule_by_seed) != set(seeds) or any(
         len(schedule["selected"]) != 2 for schedule in schedules
     ):
         raise InvalidP4V2EEngineering("engineering schedule identity differs")
@@ -1539,7 +1574,7 @@ def _build_summary(
     scheduled_step_reachability: list[dict[str, Any]] = []
     for condition in CONDITIONS[1:]:
         reachable = 0
-        for seed in ENGINEERING_EPISODE_SEEDS:
+        for seed in seeds:
             outcome = episode_by_condition_seed[(condition, seed)]["outcome"]
             episode_length = int(outcome["episode_length"])
             reachable_for_seed = sum(
@@ -1558,7 +1593,8 @@ def _build_summary(
                     "nonzero_steps": int(outcome["nonzero_steps"]),
                 }
             )
-        condition_summaries[condition]["scheduled_steps_total"] = 10
+        scheduled_total = 2 * len(seeds)
+        condition_summaries[condition]["scheduled_steps_total"] = scheduled_total
         condition_summaries[condition]["scheduled_steps_reachable_total"] = reachable
         condition_summaries[condition]["seeds_with_reachable_attack"] = sum(
             row["reachable_steps"] >= 1
@@ -1566,7 +1602,7 @@ def _build_summary(
             if row["condition"] == condition
         )
         condition_summaries[condition]["scheduled_steps_unreached_after_termination_total"] = (
-            10 - reachable
+            scheduled_total - reachable
         )
     structural_integrity = bool(
         all(
@@ -1612,10 +1648,10 @@ def _build_summary(
     )
     envelope_by_seed = {
         seed: max(drop_by_condition_seed[(condition, seed)] for condition in envelope_conditions)
-        for seed in ENGINEERING_EPISODE_SEEDS
+        for seed in seeds
     }
     paired_advantages = [
-        return_by_seed[seed] - envelope_by_seed[seed] for seed in ENGINEERING_EPISODE_SEEDS
+        return_by_seed[seed] - envelope_by_seed[seed] for seed in seeds
     ]
     advantage_array = np.asarray(paired_advantages, dtype=np.float64)
     advantage_loo = [
@@ -1637,10 +1673,10 @@ def _build_summary(
         and maximum_positive_advantage_share <= 0.5
     )
     return {
-        "schema_version": P4_V2E_ENGINEERING_SUMMARY_SCHEMA,
-        "status": "engineering_screening_complete",
+        "schema_version": P4_V2E_MATRIX_SUMMARY_SCHEMA,
+        "status": "comparison_matrix_complete",
         "test_scope": True,
-        "episode_seeds": list(ENGINEERING_EPISODE_SEEDS),
+        "episode_seeds": list(seeds),
         "conditions": list(CONDITIONS),
         "condition_summaries": condition_summaries,
         "per_seed": per_seed,
@@ -1667,7 +1703,7 @@ def _build_summary(
                     "envelope_drop": envelope_by_seed[seed],
                     "advantage": value,
                 }
-                for seed, value in zip(ENGINEERING_EPISODE_SEEDS, paired_advantages, strict=True)
+                for seed, value in zip(seeds, paired_advantages, strict=True)
             ],
             "mean_advantage": float(np.mean(advantage_array)),
             "median_advantage": float(np.median(advantage_array)),
@@ -1706,11 +1742,38 @@ def _build_summary(
     }
 
 
-def _execute(base: Any, v2d_runtime: Any, return_runtime: Any) -> dict[str, Any]:
+def _build_summary(
+    schedules: Sequence[Mapping[str, Any]],
+    episodes: Sequence[Mapping[str, Any]],
+    steps: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Build the formal engineering summary on its sole frozen seed cohort."""
+
+    summary = _build_matrix_summary(
+        schedules,
+        episodes,
+        steps,
+        episode_seeds=ENGINEERING_EPISODE_SEEDS,
+    )
+    return {
+        **summary,
+        "schema_version": P4_V2E_ENGINEERING_SUMMARY_SCHEMA,
+        "status": "engineering_screening_complete",
+    }
+
+
+def _execute_matrix(
+    base: Any,
+    v2d_runtime: Any,
+    return_runtime: Any,
+    *,
+    episode_seeds: Sequence[int],
+) -> dict[str, Any]:
+    seeds = _matrix_episode_seeds(episode_seeds)
     schedules: list[dict[str, Any]] = []
     steps: list[dict[str, Any]] = []
     episodes: list[dict[str, Any]] = []
-    for seed in ENGINEERING_EPISODE_SEEDS:
+    for seed in seeds:
         clean_outcome, clean_rows, clean_steps = _run_signed_clean_episode(
             base, episode_seed=seed, step_limit=MERGELITE9_MAX_EPISODE_STEPS
         )
@@ -1832,13 +1895,30 @@ def _execute(base: Any, v2d_runtime: Any, return_runtime: Any) -> dict[str, Any]
                     "queries": (native + logical).to_record(),
                 }
             )
-    summary = _build_summary(schedules, episodes, steps)
+    summary = _build_matrix_summary(schedules, episodes, steps, episode_seeds=seeds)
     return {
         "schedules.json": schedules,
         "steps.json": steps,
         "episodes.json": episodes,
         "summary.json": summary,
     }
+
+
+def _execute(base: Any, v2d_runtime: Any, return_runtime: Any) -> dict[str, Any]:
+    """Execute only the frozen formal engineering cohort."""
+
+    payloads = _execute_matrix(
+        base,
+        v2d_runtime,
+        return_runtime,
+        episode_seeds=ENGINEERING_EPISODE_SEEDS,
+    )
+    payloads["summary.json"] = {
+        **payloads["summary.json"],
+        "schema_version": P4_V2E_ENGINEERING_SUMMARY_SCHEMA,
+        "status": "engineering_screening_complete",
+    }
+    return payloads
 
 
 def _write_json(path: Path, value: object) -> dict[str, Any]:
