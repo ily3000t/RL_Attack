@@ -1,0 +1,63 @@
+schema_version: rl_attack.p4_v2de_unified_development_config.v1
+name: p4_mergelite9_v2de_unified_development
+environment_name: RL_Attack_Core_Py310
+
+parent:
+  preparation: outputs/p4_mergelite9_v2b_prepared_7d0b72f_20260825
+  manifest_sha256: f134cb53245a2573235357ce9da90424d48e3dc4e2c2107cf52982d3783788d0
+
+legacy_v2c:
+  config: configs/experiments/p4_mergelite9_v2c_matched_engineering.yaml
+  config_sha256: c926bb003ab0a5691d854ff0ebfd8135efd66d72430db53a414cc9ac7ebd273d
+  run: outputs/p4_v2c_engineering_cf194e3_20260826
+  manifest_sha256: 999ecadcb6229cee22cab9f9f0d4fba0e8caedfcbc89d50bb72841d42852b637
+
+common_seed_protocol:
+  episode_seeds: [556000, 556001, 556002, 556003, 556004]
+  train_episode_seeds: [556000, 556001, 556002, 556003]
+  validation_episode_seeds: [556004]
+  evaluation_episode_seeds: [556000, 556001, 556002, 556003, 556004]
+  roles: [counterfactual_collection, critic_training, critic_validation, engineering_comparison]
+  same_scenarios_across_methods: true
+  train_evaluation_overlap_acknowledged: true
+  claim_scope: development_in_sample_only
+
+training:
+  v2d:
+    epochs: 40
+    batch_size: 128
+    model_seed: 547001
+  v2e:
+    epochs: 80
+    batch_size: 128
+    model_seed: 547004
+    validation_fraction: 0.2
+
+threat:
+  scope: PPO_policy_observation_only
+  epsilon_ratio: 6.0
+  projector: MergeLite9_sensor_v2
+  solver_steps: 20
+  solver_restarts: 5
+  shared_restart_plan: true
+
+conditions:
+  - clean
+  - random_fixed_schedule
+  - fgsm_fixed_schedule
+  - pgd20x5_fixed_schedule
+  - mad20x5_fixed_schedule
+  - stfa_v2c_composite_on_v2e_schedule
+  - stfa_v2d_positive_part_on_v2e_schedule
+  - stfa_v2e_signed_return_fixed_timing
+
+claims:
+  formal_evaluation_eligible: false
+  formal_summary_eligible: false
+  effectiveness_claim_eligible: false
+  superiority_claim_eligible: false
+  statistical_significance_claimed: false
+  sumo_effectiveness_claimed: false
+  vanilla_problem_solved: false
+  causal_online_director_claimed: false
+
