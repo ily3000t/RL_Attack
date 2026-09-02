@@ -672,6 +672,8 @@ _CSV_FIELDS = (
     "leave_one_out_mean_delta_g_minimum",
     "maximum_positive_mass_share",
     "worst_delta_g",
+    "mean_safety_cost_delta",
+    "merge_failure_rate_delta_vs_clean",
     "action_flips_total",
     "native_gradient_queries",
     "delta_g_per_100_native_gradient_queries",

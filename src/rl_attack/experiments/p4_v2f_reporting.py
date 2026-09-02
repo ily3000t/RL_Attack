@@ -618,6 +618,9 @@ def _condition_summary(
         raise InvalidP4V2FReporting(f"condition {condition!r} seed matrix is incomplete")
     per_seed: list[dict[str, Any]] = []
     drops: list[float] = []
+    safety_deltas: list[float] = []
+    merge_failure_deltas: list[float] = []
+    collision_deltas: list[float] = []
     native = _zero_queries()
     logical = _zero_queries()
     selected = nonzero = flips = 0
@@ -627,7 +630,18 @@ def _condition_summary(
         outcome = row["outcome"]
         clean_outcome = clean["outcome"]
         delta_g = clean_outcome["discounted_return"] - outcome["discounted_return"]
+        safety_delta = (
+            outcome["cumulative_safety_cost"]
+            - clean_outcome["cumulative_safety_cost"]
+        )
+        merge_failure_delta = float(outcome["merge_failure"]) - float(
+            clean_outcome["merge_failure"]
+        )
+        collision_delta = float(outcome["collision"]) - float(clean_outcome["collision"])
         drops.append(delta_g)
+        safety_deltas.append(safety_delta)
+        merge_failure_deltas.append(merge_failure_delta)
+        collision_deltas.append(collision_delta)
         native = _add_queries(native, row["native_queries"])
         logical = _add_queries(logical, row["logical_schedule_queries"])
         selected += outcome["selected_steps"]
@@ -643,10 +657,9 @@ def _condition_summary(
                 ),
                 "discounted_return": outcome["discounted_return"],
                 "episode_return": outcome["episode_return"],
-                "safety_cost_delta": (
-                    outcome["cumulative_safety_cost"]
-                    - clean_outcome["cumulative_safety_cost"]
-                ),
+                "safety_cost_delta": safety_delta,
+                "merge_failure_delta": merge_failure_delta,
+                "collision_delta": collision_delta,
                 "merge_failure": outcome["merge_failure"],
                 "collision": outcome["collision"],
                 "selected_steps": outcome["selected_steps"],
@@ -679,12 +692,16 @@ def _condition_summary(
         "mean_safety_cost": statistics.fmean(
             by_seed[seed]["outcome"]["cumulative_safety_cost"] for seed in seeds
         ),
+        "mean_safety_cost_delta": statistics.fmean(safety_deltas),
+        "median_safety_cost_delta": statistics.median(safety_deltas),
         "merge_failure_rate": statistics.fmean(
             float(by_seed[seed]["outcome"]["merge_failure"]) for seed in seeds
         ),
+        "merge_failure_rate_delta_vs_clean": statistics.fmean(merge_failure_deltas),
         "collision_rate": statistics.fmean(
             float(by_seed[seed]["outcome"]["collision"]) for seed in seeds
         ),
+        "collision_rate_delta_vs_clean": statistics.fmean(collision_deltas),
         "selected_steps_total": selected,
         "nonzero_steps_total": nonzero,
         "action_flips_total": flips,
@@ -1039,8 +1056,9 @@ def render_v2f_comparison_markdown(report: Mapping[str, Any]) -> str:
                 f"## {title}",
                 "",
                 "| method | timing relation | mean ΔG | median ΔG | positive | min LOO | "
-                "max positive mass | worst ΔG | native grad | ΔG/100 grad |",
-                "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+                "max positive mass | worst ΔG | mean ΔC | Δfailure | native grad | "
+                "ΔG/100 grad |",
+                "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
             ]
         )
         for row in view["table"]:
@@ -1056,6 +1074,8 @@ def render_v2f_comparison_markdown(report: Mapping[str, Any]) -> str:
                         _format_number(row["leave_one_out_mean_delta_g_minimum"]),
                         _format_number(row["maximum_positive_mass_share"]),
                         _format_number(row["worst_delta_g"]),
+                        _format_number(row["mean_safety_cost_delta"]),
+                        _format_number(row["merge_failure_rate_delta_vs_clean"]),
                         str(row["native_gradient_queries"]),
                         _format_number(row["delta_g_per_100_native_gradient_queries"]),
                     )
