@@ -135,9 +135,37 @@ def _episode_matrices() -> tuple[
                     gradient_queries=2,
                 ),
                 _episode(
+                    "pgd20x5_fixed_schedule",
+                    seed,
+                    drop=0.15,
+                    schedule_sha256=golden_sha,
+                    gradient_queries=200,
+                ),
+                _episode(
                     "mad20x5_fixed_schedule",
                     seed,
                     drop=0.2,
+                    schedule_sha256=golden_sha,
+                    gradient_queries=200,
+                ),
+                _episode(
+                    "stfa_v2c_composite_on_v2e_schedule",
+                    seed,
+                    drop=0.22,
+                    schedule_sha256=golden_sha,
+                    gradient_queries=200,
+                ),
+                _episode(
+                    "stfa_v2d_positive_part_on_v2e_schedule",
+                    seed,
+                    drop=0.24,
+                    schedule_sha256=golden_sha,
+                    gradient_queries=200,
+                ),
+                _episode(
+                    "stfa_v2e_signed_return_fixed_timing",
+                    seed,
+                    drop=0.26,
                     schedule_sha256=golden_sha,
                     gradient_queries=200,
                 ),
@@ -207,7 +235,7 @@ def test_selector_requires_exact_two_positive_temporally_feasible_rows() -> None
         build_v2f_top2_schedules(rows, episode_seeds=SEEDS)
 
 
-def test_development_views_close_effect_gate_and_separate_fgsm_mad_efficiency() -> None:
+def test_development_views_close_effect_gate_and_all_paired_efficiencies() -> None:
     golden, fixed, own = _episode_matrices()
     report = build_v2f_development_views(golden, fixed, own, episode_seeds=SEEDS)
     fixed_view = report["fixed_timing"]
@@ -216,7 +244,14 @@ def test_development_views_close_effect_gate_and_separate_fgsm_mad_efficiency() 
         "positive_count": 4,
         "worst": pytest.approx(-0.2),
     }
-    assert set(fixed_view["paired_comparisons"]) == {"fgsm", "mad"}
+    assert set(fixed_view["paired_comparisons"]) == {
+        "fgsm",
+        "pgd",
+        "mad",
+        "v2c",
+        "v2d",
+        "v2e",
+    }
     fgsm = fixed_view["paired_comparisons"]["fgsm"]
     mad = fixed_view["paired_comparisons"]["mad"]
     assert fgsm["timing_matched"] is True
@@ -294,4 +329,3 @@ def test_markdown_marks_own_timing_noncausal_and_claims_false() -> None:
     assert "timing_unmatched_descriptive_only" in markdown
     assert "FGSM" in markdown and "MAD-20x5" in markdown
     assert "claims remain false" in markdown
-

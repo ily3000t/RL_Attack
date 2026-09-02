@@ -318,17 +318,29 @@ def _repository_record(*, require_clean: bool) -> dict[str, Any]:
 def _source_hashes() -> dict[str, Any]:
     root = _repository_root()
     paths = {
+        "artifacts": root / "src/rl_attack/core/artifacts.py",
         "development": Path(__file__).resolve(),
         "development_cli": root / "src/rl_attack/cli/p4_v2f_development.py",
         "execution": root / "src/rl_attack/experiments/p4_v2f_execution.py",
         "golden_importer": root / "src/rl_attack/experiments/p4_v2f_golden.py",
         "reporting": root / "src/rl_attack/experiments/p4_v2f_reporting.py",
+        "preparation": root / "src/rl_attack/experiments/p4_v2f_preparation.py",
+        "matched_execution": root / "src/rl_attack/experiments/p4_v2b_matched.py",
+        "stfa_attack": root / "src/rl_attack/attacks/strong/stfa/attack.py",
+        "stfa_contracts": root / "src/rl_attack/attacks/strong/stfa/contracts.py",
+        "stfa_objective": root / "src/rl_attack/attacks/strong/stfa/objective.py",
+        "stfa_temporal": root / "src/rl_attack/attacks/strong/stfa/temporal.py",
+        "stfa_trajectory": root / "src/rl_attack/attacks/strong/stfa/trajectory.py",
         "expected_return_runtime": (
             root / "src/rl_attack/attacks/strong/stfa/expected_return.py"
         ),
         "expected_return_critic": (
             root / "src/rl_attack/training/p4_v2f_expected_return_critic.py"
         ),
+        "mergelite9": root / "src/rl_attack/envs/mergelite9.py",
+        "sb3_adapter": root / "src/rl_attack/policies/sb3.py",
+        "victim_loader": root / "src/rl_attack/training/stfa_pipeline.py",
+        "policy_state_hash": root / "src/rl_attack/training/robust_sarsa.py",
     }
     result = {name: sha256_file(path) for name, path in paths.items()}
     result["sha256"] = canonical_json_sha256(result)
@@ -496,7 +508,6 @@ def _episode_record(
         "condition": execution["condition"],
         "episode_seed": execution["episode_seed"],
         "schedule_sha256": schedule_sha256,
-        "execution_sha256": execution["sha256"],
         "outcome": execution["outcome"],
         "objective": execution["objective"],
         "native_queries": native.to_record(),
@@ -542,6 +553,92 @@ def _fixed_schedule_records(bundle: P4V2FGoldenBundle) -> list[dict[str, Any]]:
         record["sha256"] = canonical_json_sha256(record)
         result.append(record)
     return result
+
+
+def _validate_episode_outcome(
+    rows: Sequence[Mapping[str, Any]], episode: Mapping[str, Any]
+) -> None:
+    if not rows:
+        raise InvalidP4V2FDevelopment("v2f episode contains no environment steps")
+    for row in rows:
+        if (
+            row.get("condition") != episode["condition"]
+            or row.get("episode_seed") != episode["episode_seed"]
+            or type(row.get("scheduled")) is not bool
+            or row.get("selected") is not row.get("scheduled")
+            or type(row.get("action_flip")) is not bool
+            or row.get("action_flip")
+            is not (row.get("executed_action") != row.get("clean_action"))
+            or row.get("actual_safety_primitive_used") is not False
+        ):
+            raise InvalidP4V2FDevelopment("v2f environment-step semantics differ")
+    selected = [row for row in rows if row["scheduled"]]
+    if len(selected) != 2:
+        raise InvalidP4V2FDevelopment("v2f episode must execute exactly two attack steps")
+    expected_objective = {
+        "name": "direct_expected_signed_discounted_return_loss",
+        "clean_values": [row["clean_expected_return_objective"] for row in selected],
+        "final_values": [row["final_expected_return_objective"] for row in selected],
+        "improvements": [row["expected_return_objective_improvement"] for row in selected],
+        "actual_safety_primitive_used": False,
+    }
+    if not _json_exact(episode.get("objective"), expected_objective):
+        raise InvalidP4V2FDevelopment("v2f episode objective ledger differs")
+    reconstructed = {
+        "episode_return": sum(float(row["reward"]) for row in rows),
+        "discounted_return": sum(
+            (0.99**index) * float(row["reward"]) for index, row in enumerate(rows)
+        ),
+        "episode_length": len(rows),
+        "cumulative_safety_cost": sum(float(row["safety_cost"]) for row in rows),
+        "discounted_safety_cost": sum(
+            (0.99**index) * float(row["safety_cost"])
+            for index, row in enumerate(rows)
+        ),
+        "collision": any(bool(row["collision"]) for row in rows),
+        "near_miss": any(bool(row["near_miss"]) for row in rows),
+        "near_miss_count": sum(bool(row["near_miss"]) for row in rows),
+        "merge_success": any(bool(row["merge_success"]) for row in rows),
+        "missed_merge": any(bool(row["missed_merge"]) for row in rows),
+        "minimum_gap": min(float(row["min_gap"]) for row in rows),
+        "minimum_ttc": min(float(row["minimum_ttc"]) for row in rows),
+        "termination_reason": str(rows[-1]["termination_reason"]),
+        "terminated": bool(rows[-1]["terminated"]),
+        "truncated": bool(rows[-1]["truncated"]),
+        "action_flips": sum(bool(row["action_flip"]) for row in rows),
+        "selected_steps": sum(bool(row["selected"]) for row in rows),
+        "nonzero_steps": sum(bool(row["perturbation_nonzero"]) for row in rows),
+    }
+    reconstructed["horizon_exhausted"] = bool(
+        not reconstructed["terminated"] and not reconstructed["truncated"]
+    )
+    reconstructed["merge_failure"] = bool(
+        (reconstructed["terminated"] or reconstructed["truncated"])
+        and not reconstructed["merge_success"]
+    )
+    observed = episode.get("outcome")
+    if not isinstance(observed, Mapping) or set(observed) != set(reconstructed):
+        raise InvalidP4V2FDevelopment("v2f episode outcome schema differs")
+    numeric = {
+        "episode_return",
+        "discounted_return",
+        "cumulative_safety_cost",
+        "discounted_safety_cost",
+        "minimum_gap",
+        "minimum_ttc",
+    }
+    for key, expected in reconstructed.items():
+        actual = observed[key]
+        if key in numeric:
+            if (
+                isinstance(actual, bool)
+                or not isinstance(actual, (int, float))
+                or not math.isfinite(float(actual))
+                or not math.isclose(float(actual), float(expected), rel_tol=0.0, abs_tol=1.0e-12)
+            ):
+                raise InvalidP4V2FDevelopment(f"v2f outcome differs: {key}")
+        elif actual != expected or type(actual) is not type(expected):
+            raise InvalidP4V2FDevelopment(f"v2f outcome differs: {key}")
 
 
 def _comparison_table(report: Mapping[str, Any]) -> dict[str, Any]:
@@ -688,6 +785,15 @@ def _validate_step_ledgers(
             raise InvalidP4V2FDevelopment("unknown v2f step row kind")
     for key, episode in by_key.items():
         outcome = episode["outcome"]
+        ordered_rows = sorted(
+            (
+                row
+                for row in steps
+                if row.get("row_kind") == "environment_step"
+                and (row.get("condition"), row.get("episode_seed")) == key
+            ),
+            key=lambda row: int(row["step_index"]),
+        )
         if sorted(environment_steps[key]) != list(range(int(outcome["episode_length"]))):
             raise InvalidP4V2FDevelopment("environment step ledger is incomplete")
         if sorted(logical_steps[key]) != list(range(len(logical_steps[key]))):
@@ -698,6 +804,7 @@ def _validate_step_ledgers(
             or native[key] + logical[key] != _query_from_record(episode["queries"])
         ):
             raise InvalidP4V2FDevelopment("step-to-episode query ledger differs")
+        _validate_episode_outcome(ordered_rows, episode)
     fixed_native = sum(
         (native[(P4_V2F_FIXED_TIMING_CONDITION, seed)] for seed in EPISODE_SEEDS),
         QueryVector(),

@@ -39,8 +39,21 @@ P4_V2F_MAXIMUM_POSITIVE_MASS_SHARE = 0.60
 P4_V2F_WORST_DELTA_G_MINIMUM = -0.25
 
 FGSM_CONDITION = "fgsm_fixed_schedule"
+PGD_CONDITION = "pgd20x5_fixed_schedule"
 MAD_CONDITION = "mad20x5_fixed_schedule"
+V2C_CONDITION = "stfa_v2c_composite_on_v2e_schedule"
+V2D_CONDITION = "stfa_v2d_positive_part_on_v2e_schedule"
+V2E_CONDITION = "stfa_v2e_signed_return_fixed_timing"
 CLEAN_CONDITION = "clean"
+
+_PAIRED_COMPARATORS = (
+    ("fgsm", FGSM_CONDITION),
+    ("pgd", PGD_CONDITION),
+    ("mad", MAD_CONDITION),
+    ("v2c", V2C_CONDITION),
+    ("v2d", V2D_CONDITION),
+    ("v2e", V2E_CONDITION),
+)
 
 CLAIMS = {
     "causal_online_director_claimed": False,
@@ -818,7 +831,7 @@ def _view(
             seeds=seeds,
             timing_matched=timing_matched,
         )
-        for key, condition in (("fgsm", FGSM_CONDITION), ("mad", MAD_CONDITION))
+        for key, condition in _PAIRED_COMPARATORS
     }
     return {
         "name": name,
@@ -941,6 +954,8 @@ def build_v2f_development_views(
         "claims": dict(CLAIMS),
         "limitations": [
             "five reusable development seeds only; no independent hold-out",
+            "fixed timing matches victim, seed, two-step schedule, projector, and epsilon only; "
+            "attack objective, solver, and query budget remain unmatched",
             "own timing uses the full clean episode and is offline/noncausal",
             "own-timing comparisons to golden attacks are timing-unmatched descriptive only",
             "single MergeLite9 PPO victim; no SUMO evidence",
