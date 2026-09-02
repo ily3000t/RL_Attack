@@ -166,6 +166,19 @@ rl-attack-p4-v2f-prepare verify `
   configs/experiments/p4_mergelite9_v2f_preparation.yaml `
   --preparation outputs/p4_v2f_prepared_<commit>_<date> `
   --expected-manifest-sha256 <printed_sha256>
+rl-attack-p4-v2f-development run `
+  configs/experiments/p4_mergelite9_v2f_development.yaml `
+  --output-dir outputs/p4_v2f_development_<commit>_<date>
+rl-attack-p4-v2f-development verify `
+  configs/experiments/p4_mergelite9_v2f_development.yaml `
+  --run outputs/p4_v2f_development_<commit>_<date> `
+  --expected-manifest-sha256 <printed_sha256>
+# Optional: deterministically rerun only the two v2f conditions.
+rl-attack-p4-v2f-development verify `
+  configs/experiments/p4_mergelite9_v2f_development.yaml `
+  --run outputs/p4_v2f_development_<commit>_<date> `
+  --expected-manifest-sha256 <printed_sha256> `
+  --full-replay
 rl-attack-train-rapid-guard train --help
 rl-attack-train-rapid-guard verify --help
 rl-attack-p5-audit <resolved-p5-config.yaml> `
@@ -224,6 +237,13 @@ see [`docs/contracts/p4_v2f_expected_return.md`](docs/contracts/p4_v2f_expected_
 The first immutable preparation passed held-out adequacy, the live-PPO input-gradient
 gate, and deterministic full replay; see
 [`docs/results/P4_V2F_PREPARATION_20260902.md`](docs/results/P4_V2F_PREPARATION_20260902.md).
+The v2f development screen imports the byte-pinned unified golden results rather
+than rerunning FGSM, PGD, MAD, v2c, v2d, or v2e. Its fixed-timing view executes
+v2f on the frozen v2e schedule for a timing-matched engineering comparison; it
+is not objective- or query-matched. Its own-timing view selects the top two
+feasible times from the complete clean episode, so it is explicitly offline and
+noncausal. Both views use only the reusable five development seeds and cannot
+support effectiveness, superiority, statistical, causal-director, or SUMO claims.
 
 ## Verification
 

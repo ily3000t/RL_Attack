@@ -1,0 +1,36 @@
+schema_version: rl_attack.p4_v2f_development_config.v1
+name: p4_mergelite9_v2f_development
+environment_name: RL_Attack_Core_Py310
+
+v2f_preparation:
+  config: configs/experiments/p4_mergelite9_v2f_preparation.yaml
+  run: outputs/p4_v2f_prepared_87783df_20260902
+  manifest_sha256: c597f3e940537b2b5874dbd12990914bdafbcfe2113673a31d7c4d5b36c509fb
+
+golden:
+  run: outputs/p4_v2de_unified_development_20260901
+  manifest_sha256: a883275fedf4920cc48e91d6a45ae37033ecf19f7bbbca3e54247214098c67aa
+
+episode_seeds: [556000, 556001, 556002, 556003, 556004]
+
+views:
+  fixed_timing: frozen_golden_v2e_schedule
+  own_timing: offline_noncausal_full_clean_episode_top2
+
+threat:
+  scope: PPO_policy_observation_only
+  epsilon_ratio: 6.0
+  projector: MergeLite9_sensor_v2
+  solver_steps: 8
+  solver_restarts: 1
+  attacks_per_episode: 2
+
+claims:
+  formal_evaluation_eligible: false
+  formal_summary_eligible: false
+  effectiveness_claim_eligible: false
+  superiority_claim_eligible: false
+  statistical_significance_claimed: false
+  sumo_effectiveness_claimed: false
+  vanilla_problem_solved: false
+  causal_online_director_claimed: false
