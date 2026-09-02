@@ -244,6 +244,9 @@ is not objective- or query-matched. Its own-timing view selects the top two
 feasible times from the complete clean episode, so it is explicitly offline and
 noncausal. Both views use only the reusable five development seeds and cannot
 support effectiveness, superiority, statistical, causal-director, or SUMO claims.
+The completed Dev-5 dual-view run and its terminal reward/safety conflict are
+documented in
+[`docs/results/P4_V2F_DEVELOPMENT_20260902.md`](docs/results/P4_V2F_DEVELOPMENT_20260902.md).
 
 ## Verification
 
