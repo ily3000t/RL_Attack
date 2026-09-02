@@ -221,6 +221,9 @@ margin is zero. The isolated clean-start solver uses exactly 8 gradients and
 one restart without changing the byte-bound generic STFA core. Fixed-timing and
 v2f-own-timing results are reported separately and remain claim-ineligible;
 see [`docs/contracts/p4_v2f_expected_return.md`](docs/contracts/p4_v2f_expected_return.md).
+The first immutable preparation passed held-out adequacy, the live-PPO input-gradient
+gate, and deterministic full replay; see
+[`docs/results/P4_V2F_PREPARATION_20260902.md`](docs/results/P4_V2F_PREPARATION_20260902.md).
 
 ## Verification
 
