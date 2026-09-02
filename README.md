@@ -159,6 +159,13 @@ rl-attack-p4-v2e-engineering verify `
   configs/experiments/p4_mergelite9_v2e_signed_return_engineering.yaml `
   --run outputs/p4_v2e_signed_engineering_<commit>_<date> `
   --expected-manifest-sha256 <printed_sha256>
+rl-attack-p4-v2f-prepare prepare `
+  configs/experiments/p4_mergelite9_v2f_preparation.yaml `
+  --output-dir outputs/p4_v2f_prepared_<commit>_<date>
+rl-attack-p4-v2f-prepare verify `
+  configs/experiments/p4_mergelite9_v2f_preparation.yaml `
+  --preparation outputs/p4_v2f_prepared_<commit>_<date> `
+  --expected-manifest-sha256 <printed_sha256>
 rl-attack-train-rapid-guard train --help
 rl-attack-train-rapid-guard verify --help
 rl-attack-p5-audit <resolved-p5-config.yaml> `
@@ -205,6 +212,15 @@ The first frozen v2e preparation passed full replay and the solver-gradient
 gate but failed the offline critic opportunity-NMAE gate, so its engineering
 seeds remain unconsumed; see
 [`docs/results/P4_V2E_SIGNED_RETURN_PREPARATION_20260831.md`](docs/results/P4_V2E_SIGNED_RETURN_PREPARATION_20260831.md).
+P4-v2f reuses the byte-pinned v2e H12/R4 signed dataset as a disjoint fixed
+`Train-A` and never trains on the reusable `Dev-5` cohort. Its critic combines
+signed magnitude regression, RankNet action ordering, and maximum-opportunity
+calibration. The inner objective is only the detached critic vector's expected
+signed return loss under the perturbed PPO action distribution; the target
+margin is zero. The isolated clean-start solver uses exactly 8 gradients and
+one restart without changing the byte-bound generic STFA core. Fixed-timing and
+v2f-own-timing results are reported separately and remain claim-ineligible;
+see [`docs/contracts/p4_v2f_expected_return.md`](docs/contracts/p4_v2f_expected_return.md).
 
 ## Verification
 
